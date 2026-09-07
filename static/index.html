@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fact Knowledge Layer</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <div>
+    <h1>Fact Knowledge Layer</h1>
+    <div class="sub">Upload a PDF, extract facts, see what corroborates / contradicts / reconciles across documents.</div>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<nav>
+  <button data-view="upload" class="active">Upload</button>
+  <button data-view="documents">Documents</button>
+  <button data-view="facts">Facts</button>
+  <button data-view="relationships">Relationships</button>
+  <button data-view="issues">Extraction Issues</button>
+</nav>
+
+<main>
+
+  <section id="view-upload" class="view active">
+    <div class="card upload-card">
+      <input type="file" id="pdfInput" accept="application/pdf" />
+      <label class="small">max pages&nbsp;<input type="number" id="maxPages" min="1" placeholder="all" style="width:70px" /></label>
+      <label class="small">or specific pages&nbsp;<input type="text" id="pagesSpec" placeholder="e.g. 1,3,7-10" style="width:120px" /></label>
+      <button class="primary" id="uploadBtn">Upload &amp; process</button>
+      <span class="small" id="uploadStatus"></span>
+    </div>
+    <div class="card">
+      <div class="small">What happens on upload: the PDF is split into pages, each page is sent to an LLM to
+      extract facts grounded in an exact quote from that page, each fact is embedded locally, and then compared
+      against every existing fact in the knowledge layer (via embedding similarity + LLM judgement) to find
+      corroborations, contradictions, and context-reconciled differences. Processing runs in the background —
+      switch to the Documents tab to watch status.</div>
+    </div>
+  </section>
+
+  <section id="view-documents" class="view">
+    <table>
+      <thead><tr><th>Document</th><th>Status</th><th>Pages</th><th>Facts</th><th>Uploaded</th><th></th></tr></thead>
+      <tbody id="documentsBody"></tbody>
+    </table>
+  </section>
+
+  <section id="view-facts" class="view">
+    <div class="filters">
+      <select id="factDocFilter"><option value="">All documents</option></select>
+      <input type="text" id="factSearch" placeholder="search statement / subject / attribute" />
+    </div>
+    <div id="factsList"></div>
+  </section>
+
+  <section id="view-relationships" class="view">
+    <div class="filters">
+      <select id="relTypeFilter">
+        <option value="">All relationship types</option>
+        <option value="corroborates">Corroborates</option>
+        <option value="contradicts">Contradicts</option>
+        <option value="reconciled">Reconciled (context)</option>
+      </select>
+    </div>
+    <div id="relList"></div>
+  </section>
+
+  <section id="view-issues" class="view">
+    <div class="small" style="margin-bottom:10px;">Things the extraction pipeline itself flagged as uncertain or
+    failed — a quote the model produced that couldn't be found verbatim on the page, a response that failed to
+    parse as JSON, a comparison call that errored, etc. This is the system's own record of where it isn't sure of
+    itself, not a hidden failure.</div>
+    <table>
+      <thead><tr><th>Document</th><th>Page</th><th>Issue</th><th>Detail</th></tr></thead>
+      <tbody id="issuesBody"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
