@@ -101,21 +101,61 @@ async function loadDocuments() {
         <td>${d.fact_count}</td>
         <td class="small">${new Date(d.uploaded_at * 1000).toLocaleString()}</td>
         <td><a href="${pdfLink(d.id, 1)}" target="_blank">open PDF</a></td>
+        <td>${d.status === "done" ? `<button class="small perf-btn" data-doc="${d.id}">perf</button>` : ""}</td>
       </tr>
     `);
+    body.appendChild(row);
     if (d.status === "failed" && d.error_message) {
-      const detail = el(`<tr><td colspan="6" class="small" style="color:#ef5563;">${escapeHtml(d.error_message)}</td></tr>`);
-      body.appendChild(row);
-      body.appendChild(detail);
-    } else {
-      body.appendChild(row);
+      body.appendChild(el(`<tr><td colspan="7" class="small" style="color:#ef5563;">${escapeHtml(d.error_message)}</td></tr>`));
+    }
+    if (d.reused_from_document_id) {
+      body.appendChild(el(`<tr><td colspan="7" class="small">↳ identical content + page selection as document #${d.reused_from_document_id} — reused its results, no LLM calls made.</td></tr>`));
     }
   }
 
-  if (!docs.length) body.appendChild(el(`<tr><td colspan="6" class="empty">No documents yet — upload one.</td></tr>`));
+  if (!docs.length) body.appendChild(el(`<tr><td colspan="7" class="empty">No documents yet — upload one.</td></tr>`));
+
+  body.querySelectorAll(".perf-btn").forEach((btn) => {
+    btn.addEventListener("click", () => togglePerfRow(btn));
+  });
 
   clearTimeout(pollTimer);
   if (anyInFlight) pollTimer = setTimeout(loadDocuments, 3000);
+}
+
+function fmtSecs(s) {
+  if (s == null) return "-";
+  return s >= 60 ? `${Math.floor(s / 60)}m ${(s % 60).toFixed(1)}s` : `${s.toFixed(1)}s`;
+}
+
+async function togglePerfRow(btn) {
+  const existing = btn.closest("tr").nextElementSibling;
+  if (existing && existing.classList.contains("perf-row")) {
+    existing.remove();
+    return;
+  }
+  const doc = await fetch(`${API}/api/documents/${btn.dataset.doc}`).then((r) => r.json());
+  const s = doc.stats;
+  const rowHtml = !s
+    ? `<tr class="perf-row"><td colspan="7" class="small">No performance stats recorded for this document (processed before this instrumentation was added).</td></tr>`
+    : `<tr class="perf-row"><td colspan="7">
+        <div class="card small" style="margin:4px 0;">
+          <div><b>Pages:</b> ${s.pages} &middot; <b>Chunks:</b> ${s.chunks} &middot; <b>Facts:</b> ${s.facts} &middot;
+               <b>Embeddings:</b> ${s.embeddings} &middot; <b>Candidate pairs:</b> ${s.candidate_pairs} &middot;
+               <b>Relationships stored:</b> ${s.relationships_stored}</div>
+          <div><b>Ollama calls:</b> ${s.ollama_calls} (extraction ${s.extraction_calls}, reasoning ${s.reasoning_calls})
+               &middot; <b>cache hits avoided:</b> ${s.extraction_cache_hits + s.reasoning_cache_hits}</div>
+          <div style="margin-top:6px;"><b>Stage timing</b></div>
+          <div>pdf_extraction: ${fmtSecs(s.timing.pdf_extraction)} &middot;
+               fact_extraction (LLM): ${fmtSecs(s.timing.fact_extraction)} &middot;
+               embeddings: ${fmtSecs(s.timing.embeddings)}</div>
+          <div>candidate_retrieval: ${fmtSecs(s.timing.candidate_retrieval)} &middot;
+               relationship_reasoning (LLM): ${fmtSecs(s.timing.relationship_reasoning)} &middot;
+               database: ${fmtSecs(s.timing.database)}</div>
+          <div style="margin-top:4px;"><b>Total: ${fmtSecs(s.timing.total)}</b></div>
+        </div>
+      </td></tr>`;
+  btn.closest("tr").insertAdjacentElement("afterend", el(rowHtml));
 }
 
 // ---------------- facts ----------------
