@@ -64,6 +64,29 @@ CREATE TABLE IF NOT EXISTS extraction_issues (
     created_at REAL NOT NULL
 );
 
+-- Keyed on hash(model + prompt + chunk text) -- see app/cache.py. A prompt
+-- or model change naturally invalidates old entries (different hash),
+-- no manual cache-busting needed. Reused whenever the same page text is
+-- extracted again, whether from a re-upload of the same PDF or from
+-- overlapping chunk windows.
+CREATE TABLE IF NOT EXISTS extraction_cache (
+    chunk_hash TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    facts_json TEXT NOT NULL,
+    issues_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+-- Keyed on hash(model + prompt + the two facts' content) -- order
+-- independent, content-based (not fact id) so the same underlying claim
+-- re-extracted into a different document still hits the cache.
+CREATE TABLE IF NOT EXISTS relationship_cache (
+    pair_hash TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_facts_document ON facts(document_id);
 CREATE INDEX IF NOT EXISTS idx_rel_a ON relationships(fact_id_a);
 CREATE INDEX IF NOT EXISTS idx_rel_b ON relationships(fact_id_b);
@@ -72,7 +95,12 @@ CREATE INDEX IF NOT EXISTS idx_rel_b ON relationships(fact_id_b);
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # busy_timeout matters now that fact extraction runs with a thread pool
+    # (see app/pipeline.py): if two worker threads happen to write at the
+    # same instant, SQLite retries for up to 30s instead of raising
+    # "database is locked". Actual LLM calls (the slow part) happen outside
+    # any connection, so lock hold times are always short.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -82,20 +110,60 @@ def get_conn():
         conn.close()
 
 
+def _ensure_column(conn, table: str, column: str, coltype: str):
+    """Additive, non-destructive migration for columns added after the
+    initial schema (documents.content_hash, documents.stats_json) -- avoids
+    forcing a fresh DB (and losing real ingested facts) every time the
+    schema gains a field."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "documents", "content_hash", "TEXT")
+        _ensure_column(conn, "documents", "stats_json", "TEXT")
+        _ensure_column(conn, "documents", "page_selector", "TEXT")
+        _ensure_column(conn, "documents", "reused_from_document_id", "INTEGER")
 
 
 # ---------------- documents ----------------
 
-def insert_document(original_name: str, stored_path: str) -> int:
+def insert_document(original_name: str, stored_path: str, content_hash: Optional[str] = None,
+                     page_selector: Optional[str] = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO documents (original_name, stored_path, status, uploaded_at) VALUES (?, ?, 'pending', ?)",
-            (original_name, stored_path, time.time()),
+            "INSERT INTO documents (original_name, stored_path, status, uploaded_at, content_hash, page_selector) "
+            "VALUES (?, ?, 'pending', ?, ?, ?)",
+            (original_name, stored_path, time.time(), content_hash, page_selector),
         )
         return cur.lastrowid
+
+
+def find_done_document_by_hash(content_hash: str, page_selector: Optional[str]) -> Optional[dict]:
+    """A prior upload of byte-identical content, processed with the exact
+    same page selector, that already finished successfully -- used to
+    short-circuit a duplicate upload entirely rather than re-running the
+    pipeline (see app/pipeline.py). Matching on page_selector too (not just
+    the hash) matters: a full-document run and a pages=52,68 run of the
+    same file are not interchangeable, so only an exact match
+    short-circuits; anything else still benefits from the chunk-level
+    extraction_cache instead.
+
+    Requires at least one fact to exist for that document: a "done" run
+    that extracted zero facts (e.g. every chunk timed out) is not a
+    success worth reusing -- a retry should get a real second attempt, not
+    be pointed back at the same all-failure result forever."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT d.* FROM documents d WHERE d.content_hash = ? AND d.status = 'done' "
+            "AND d.page_selector IS ? AND EXISTS (SELECT 1 FROM facts f WHERE f.document_id = d.id) "
+            "ORDER BY d.id DESC LIMIT 1",
+            (content_hash, page_selector),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def update_document(document_id: int, **fields: Any):
@@ -229,3 +297,41 @@ def list_issues(document_id: Optional[int] = None) -> list[dict]:
                 "SELECT * FROM extraction_issues WHERE document_id = ? ORDER BY id DESC", (document_id,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------- caches (see app/cache.py for key derivation) ----------------
+
+def get_cached_extraction(chunk_hash: str) -> Optional[dict]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT facts_json, issues_json FROM extraction_cache WHERE chunk_hash = ?", (chunk_hash,)
+        ).fetchone()
+        if not row:
+            return None
+        return {"facts": json.loads(row["facts_json"]), "issues": json.loads(row["issues_json"])}
+
+
+def set_cached_extraction(chunk_hash: str, model: str, facts: list[dict], issues: list[dict]):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO extraction_cache (chunk_hash, model, facts_json, issues_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (chunk_hash, model, json.dumps(facts), json.dumps(issues), time.time()),
+        )
+
+
+def get_cached_relationship(pair_hash: str) -> Optional[dict]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT result_json FROM relationship_cache WHERE pair_hash = ?", (pair_hash,)
+        ).fetchone()
+        return json.loads(row["result_json"]) if row else None
+
+
+def set_cached_relationship(pair_hash: str, model: str, result: dict):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO relationship_cache (pair_hash, model, result_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (pair_hash, model, json.dumps(result), time.time()),
+        )
