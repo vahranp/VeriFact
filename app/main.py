@@ -2,6 +2,7 @@
 FastAPI app: upload PDFs, inspect extracted facts, inspect cross-document
 relationships. Serves a small static UI at "/".
 """
+import json
 import shutil
 import time
 import uuid
@@ -14,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import db
+from app.cache import hash_file
 from app.config import UPLOAD_DIR, BASE_DIR
 from app.pipeline import process_document
 
@@ -68,7 +70,25 @@ async def upload_document(
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    document_id = db.insert_document(file.filename, str(dest))
+    content_hash = hash_file(str(dest))
+    page_selector = pages if pages else (f"max:{max_pages}" if max_pages is not None else None)
+
+    # Same bytes, same page selector as a prior completed run -> nothing
+    # new to do. Cheap (one hash + one indexed lookup) and fully safe: it
+    # only fires on an exact match, never on a merely-similar upload.
+    prior = db.find_done_document_by_hash(content_hash, page_selector)
+    if prior:
+        document_id = db.insert_document(file.filename, str(dest), content_hash, page_selector)
+        db.update_document(
+            document_id, status="done",
+            num_pages=prior["num_pages"],
+            reused_from_document_id=prior["id"],
+            error_message=f"Identical content + page selection as document {prior['id']} -- reused its facts and relationships, no LLM calls made.",
+            stats_json=prior.get("stats_json"),
+        )
+        return {"id": document_id, "status": "done", "reused_document_id": prior["id"]}
+
+    document_id = db.insert_document(file.filename, str(dest), content_hash, page_selector)
     background_tasks.add_task(process_document, document_id, str(dest), max_pages, pages)
     return {"id": document_id, "status": "pending"}
 
@@ -81,7 +101,10 @@ def list_documents():
     for f in facts:
         counts[f["document_id"]] = counts.get(f["document_id"], 0) + 1
     for d in docs:
-        d["fact_count"] = counts.get(d["id"], 0)
+        # A reused (duplicate-content) document has no fact rows of its own
+        # -- attribute its source document's count so it doesn't look empty.
+        source_id = d.get("reused_from_document_id") or d["id"]
+        d["fact_count"] = counts.get(source_id, 0)
     return docs
 
 
@@ -90,10 +113,16 @@ def get_document(document_id: int):
     d = db.get_document(document_id)
     if not d:
         raise HTTPException(404, "Document not found")
-    d["facts"] = db.list_facts(document_id)
-    d["issues"] = db.list_issues(document_id)
+    # Reused documents store no facts of their own (see upload_document's
+    # dedup short-circuit) -- read through to the source so the API still
+    # returns real data rather than an empty-looking "done" document.
+    source_id = d.get("reused_from_document_id") or document_id
+    d["facts"] = db.list_facts(source_id)
+    d["issues"] = db.list_issues(source_id)
     for f in d["facts"]:
         f.pop("embedding_json", None)
+    stats_json = d.pop("stats_json", None)
+    d["stats"] = json.loads(stats_json) if stats_json else None
     return d
 
 

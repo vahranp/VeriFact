@@ -7,7 +7,9 @@ counts as a fact").
 """
 import re
 
-from app.config import EXTRACTION_MODEL
+from app import db
+from app.cache import hash_text
+from app.config import EXTRACTION_MODEL, EXTRACTION_TIMEOUT_SECONDS
 from app.llm_client import chat_json, LLMError, LLMParseError
 from app.pdf_extract import Chunk
 
@@ -40,8 +42,12 @@ Respond with ONLY a JSON array (no prose, no markdown fences). Each element:
   "confidence": <0.0-1.0, how explicitly/directly the page states this>
 }
 
-Extract at most 25 of the most meaningful facts per page. Skip trivial repetition. If the \
-page has no extractable facts, return an empty array []."""
+Extract at most 15 of the most meaningful facts per chunk -- prioritize quality and variety \
+over exhaustive coverage. If the text is a dense uniform table (e.g. a full balance sheet or a \
+multi-year line-item schedule), do NOT try to transcribe every row: pick the handful of rows \
+most likely to matter on their own (totals, subtotals, headline figures) rather than every \
+minor line item. Skip trivial repetition. If the page has no extractable facts, return an \
+empty array []."""
 
 
 _NULLISH = {"null", "none", "n/a", "na", ""}
@@ -92,9 +98,22 @@ def _recover_non_list_shape(raw: dict) -> tuple[list | None, str | None]:
     return None, None
 
 
-def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict]]:
-    """Returns (facts, issues). `facts` have a 'quote_grounded' bool added.
-    `issues` are dicts ready to hand to db.insert_issue (issue_type/detail/raw_excerpt)."""
+def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict], bool]:
+    """Returns (facts, issues, cache_hit). `facts` have a 'quote_grounded'
+    bool added. `issues` are dicts ready to hand to
+    db.insert_issue (issue_type/detail/raw_excerpt).
+
+    Cache key is hash(model, prompt, chunk text) -- NOT document name or
+    page number, so identical page text hits the cache whether it arrives
+    via a re-upload of the same PDF, an overlapping chunk window, or a
+    different file that happens to contain identical text. Changing
+    EXTRACTION_MODEL or SYSTEM_PROMPT changes the hash, so a prompt/model
+    change can never silently serve a stale cached answer."""
+    chunk_hash = hash_text(EXTRACTION_MODEL, SYSTEM_PROMPT, chunk.text)
+    cached = db.get_cached_extraction(chunk_hash)
+    if cached is not None:
+        return cached["facts"], cached["issues"], True
+
     issues: list[dict] = []
     user_prompt = (
         f"Document: {document_name}\nPage: {chunk.page_number}\n\n"
@@ -102,13 +121,14 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
     )
 
     try:
-        raw = chat_json(EXTRACTION_MODEL, SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=3000)
+        raw = chat_json(EXTRACTION_MODEL, SYSTEM_PROMPT, user_prompt, temperature=0.0,
+                         max_tokens=3000, timeout=EXTRACTION_TIMEOUT_SECONDS)
     except LLMError as exc:
         issues.append({"issue_type": "llm_call_failed", "detail": str(exc), "raw_excerpt": ""})
-        return [], issues
+        return [], issues, False
     except LLMParseError as exc:
         issues.append({"issue_type": "unparseable_response", "detail": str(exc), "raw_excerpt": exc.raw_content})
-        return [], issues
+        return [], issues, False
 
     if not isinstance(raw, list):
         original_raw = raw
@@ -119,7 +139,7 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
                 "detail": f"Expected a JSON array of facts, got {type(original_raw).__name__} that we couldn't recover",
                 "raw_excerpt": str(original_raw)[:1000],
             })
-            return [], issues
+            return [], issues, False
         issues.append({
             "issue_type": "unexpected_shape_recovered",
             "detail": (
@@ -173,4 +193,10 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
             "confidence": item.get("confidence"),
         })
 
-    return facts, issues
+    # Cache the outcome even if it contains issues (e.g. an ungrounded
+    # quote) -- the cache stores "what the model actually said for this
+    # exact input", not "a verified-correct answer"; re-asking would
+    # deterministically waste a call to get the same imperfect answer
+    # again, not a better one.
+    db.set_cached_extraction(chunk_hash, EXTRACTION_MODEL, facts, issues)
+    return facts, issues, False
