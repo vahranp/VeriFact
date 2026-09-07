@@ -253,6 +253,9 @@ deliberately harsher than the README, which states limitations plainly but doesn
   sample of 40 surviving relationships and report true precision.
 
 **MEDIUM**
+- `reconciled` can absorb extraction errors: a fact whose quote is the bare string `"8"` was
+  reconciled against `1.4 Mn Tons` on a fabricated unit explanation. A quote carrying no context
+  is not evidence and should be ineligible for reconciliation, checked at extraction time.
 - Case 2's canonical pair still resolves against a fact extracted before the page-context fix, so
   it demonstrates the `magnitude_suspect` guard rather than the contradiction itself. Fix:
   re-extract that page with the extraction cache cleared for the affected chunk.

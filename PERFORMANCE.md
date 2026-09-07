@@ -398,3 +398,24 @@ That last one is worth dwelling on: the system found it by comparing facts again
 by any rule about director tables. It's also a reminder that a detected contradiction can mean the
 *extraction* was wrong rather than the document — which is exactly why these surface for review
 instead of being auto-resolved.
+
+### Still open: `reconciled` can paper over a bad extraction
+
+Reviewing the cleaned output surfaced one more issue, recorded here rather than left unstated:
+
+> `PTL freight tonnage in FY24 was 8 thousand tons` **reconciled** with
+> `PTL freight tonnage in FY24 was 1.4 Mn Tons` — *"reconciled by unit (thousands vs millions)"*
+
+Eight thousand tons is not 1.4 million tons under any unit reading, and the supporting quote for
+the first fact is the bare string `"8"` — an extraction failure, not a reconcilable difference.
+The model reached for a plausible-sounding reconciling reason instead of reporting that the
+values simply don't line up.
+
+This is the risk inherent in having a `reconciled` category at all: it's the label that accepts an
+explanation, so it's the one that will absorb errors elsewhere in the pipeline. The 26
+`corroborates` → `reconciled` relabels in the audit above are an improvement on average, but this
+example shows the category is not self-policing.
+
+The fix is not a prompt tweak — it's that a fact whose quote is a bare number carries no real
+evidence and should not be eligible for reconciliation in the first place. That check belongs at
+extraction time, alongside the existing quote-grounding verification.
