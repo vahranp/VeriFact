@@ -23,6 +23,14 @@ from app.relationships import classify_pair
 
 STORABLE = ("corroborates", "contradicts", "reconciled")
 
+# Deletions are committed in batches rather than once at the end. A full
+# corpus audit is hours of local inference, and an all-or-nothing write at
+# the finish line means an interruption throws away every judgment made.
+# Re-running after a stop is cheap regardless -- step 1 results are cached
+# by prompt hash, so already-judged pairs come back without an LLM call --
+# but there is no reason to discard completed work in the first place.
+DELETE_BATCH = 10
+
 
 def out(s):
     sys.stdout.write(str(s).encode("ascii", "replace").decode() + "\n")
@@ -45,7 +53,18 @@ def audit(document_id=None, apply_changes=False):
         f"{' (will delete those that no longer hold)' if apply_changes else ' (report only)'}")
 
     kept = dropped = relabelled = errors = 0
+    deleted = 0
     doomed = []
+
+    def flush():
+        nonlocal doomed, deleted
+        if not (apply_changes and doomed):
+            return
+        with db.get_conn() as c:
+            c.executemany("delete from relationships where id=?", [(i,) for i in doomed])
+        deleted += len(doomed)
+        out(f"       ... deleted {len(doomed)} (running total {deleted})")
+        doomed = []
 
     for i, r in enumerate(rels, 1):
         fa, fb = db.get_fact(r["fact_id_a"]), db.get_fact(r["fact_id_b"])
@@ -64,21 +83,22 @@ def audit(document_id=None, apply_changes=False):
             doomed.append(r["id"])
             out(f"  [{i}/{len(rels)}] DROP (was {old}): "
                 f"{str(fa.get('attribute'))[:34]} vs {str(fb.get('attribute'))[:34]}")
+            if len(doomed) >= DELETE_BATCH:
+                flush()
         else:
             kept += 1
             if new != old:
                 relabelled += 1
                 out(f"  [{i}/{len(rels)}] {old} -> {new}")
 
-    if apply_changes and doomed:
-        with db.get_conn() as c:
-            c.executemany("delete from relationships where id=?", [(i,) for i in doomed])
-        out(f"\ndeleted {len(doomed)} relationships that no longer hold")
+    flush()
 
     total = kept + dropped
     pct = (dropped / total * 100) if total else 0.0
     out("")
     out(f"kept {kept} | dropped {dropped} ({pct:.0f}%) | relabelled {relabelled} | errors {errors}")
+    if apply_changes:
+        out(f"deleted {deleted} relationships that no longer hold")
     return dropped
 
 
