@@ -161,3 +161,46 @@ class TestRelationTypeGating:
         """Guards the database against a model returning an unexpected
         enum value -- only the three real relationship types are stored."""
         assert (relation in ("corroborates", "contradicts", "reconciled")) is should_store
+
+
+class TestMetricPromptGuidance:
+    """The metric-match prompt is the component that decides whether a pair
+    is even eligible to be called a contradiction, so the instructions it
+    depends on are asserted here. These exist because a real regression
+    slipped through: the prompt listed "revenue from services" as a synonym
+    for "revenue", which directly contradicted the segment rule added later
+    and caused three false contradictions between different revenue
+    segments on a live document.
+    """
+
+    def test_prompt_requires_naming_each_slice_before_judging(self):
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        assert "slice_a" in SYSTEM_PROMPT_METRIC
+        assert "slice_b" in SYSTEM_PROMPT_METRIC
+        # the ordering matters: naming the slice must come before the verdict
+        assert SYSTEM_PROMPT_METRIC.index("STAGE 1") < SYSTEM_PROMPT_METRIC.index("STAGE 2")
+
+    def test_prompt_covers_part_versus_total(self):
+        """A segment compared against its own total is the specific shape
+        that manufactures false contradictions -- the smaller figure is
+        supposed to be smaller."""
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        assert "whole" in SYSTEM_PROMPT_METRIC
+        assert "false contradiction" in SYSTEM_PROMPT_METRIC.lower()
+
+    def test_synonym_guidance_is_scoped_to_matching_slices(self):
+        """Synonym guidance must not be stated unconditionally, or it
+        overrides the slice check -- which is exactly the bug that
+        occurred."""
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        synonym_pos = SYSTEM_PROMPT_METRIC.index("net worth")
+        scoping_pos = SYSTEM_PROMPT_METRIC.index("When the slices DO match")
+        assert scoping_pos < synonym_pos, (
+            "synonym examples must appear after the clause that scopes them "
+            "to slice-matching pairs"
+        )
+
+    def test_revenue_from_services_is_not_listed_as_an_unconditional_synonym(self):
+        """The specific line that caused the regression."""
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        assert '"revenue from services"' not in SYSTEM_PROMPT_METRIC

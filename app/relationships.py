@@ -69,13 +69,27 @@ are asserting something about the exact same underlying real-world metric or att
 whether their values agree or disagree. That numeric comparison, if relevant, happens in a \
 separate step after this one, so do not consider the values at all here.
 
-Judge "same metric" by real-world meaning, not by whether the attribute labels are worded \
-identically: business and accounting terminology routinely uses several different words for \
-one concept depending on the document/author (e.g. "net worth" = "total equity" = \
-"shareholders' equity"; "revenue" = "revenue from operations" = "revenue from services" = \
-"turnover" = "sales", especially for a company whose core business already IS providing a \
-service; "gross merchandise value" = "GMV"). When two facts' attributes could plausibly be \
-different names for the same metric, answer yes.
+Work through this in two stages, in order.
+
+STAGE 1 -- name the SLICE each fact measures. A slice is the qualifier that narrows a broad \
+measure down to one part of it: a business segment, a product line, a geography, a division, a \
+customer type, a facility. Write it as a short phrase, or "whole" if the fact covers the entire \
+measure with no narrowing qualifier. Examples: "cross border revenue" -> slice is "cross border"; \
+"revenue in the North region" -> slice is "North region"; "total revenue" or "revenue from \
+operations" -> slice is "whole".
+
+STAGE 2 -- the slices must match before anything else is considered. If the two slices are \
+different parts of one broad measure ("cross border" vs "PTL freight"), answer NO. If one is a \
+slice and the other is "whole" ("cross border revenue" vs "total revenue"), answer NO -- a part \
+is supposed to be smaller than its total, so calling them the same metric manufactures a false \
+contradiction out of an expected difference. Only when the slices match do you go on to judge \
+whether the underlying measure is the same.
+
+When the slices DO match, judge the measure by real-world meaning rather than identical wording: \
+business and accounting terminology uses several words for one concept depending on the \
+document/author (e.g. "net worth" = "total equity" = "shareholders' equity"; "revenue" = \
+"revenue from operations" = "turnover" = "sales"; "gross merchandise value" = "GMV"). When two \
+whole-slice facts could plausibly be different names for the same measure, answer yes.
 
 But two facts about the same person, company, or subject are NOT automatically the same metric \
 just because they share a subject -- check whether they measure the SAME aspect of that \
@@ -88,8 +102,11 @@ physically different things (a warehouse in one city vs. a warehouse in another 
 company's stake in one investee vs. its stake in a different investee) are not the same metric \
 merely because they share a similar sentence structure -- answer no.
 
-Respond with ONLY this JSON object:
+Respond with ONLY this JSON object. Fill in the slice fields FIRST -- naming them explicitly is \
+what forces the stage-2 check to actually happen rather than being skipped:
 {
+  "slice_a": "<the slice fact A measures, or \\"whole\\">",
+  "slice_b": "<the slice fact B measures, or \\"whole\\">",
   "same_metric": true | false,
   "reason": "<one sentence: what specific metric they share, or why they differ>"
 }"""

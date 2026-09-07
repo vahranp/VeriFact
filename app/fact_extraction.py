@@ -36,7 +36,7 @@ Respond with ONLY a JSON array (no prose, no markdown fences). Each element:
   "value": "<the stated value as text, keep original formatting/currency symbols>",
   "value_numeric": <number, or null if not numeric>,
   "unit": "<unit if applicable, e.g. INR million, %, count, or null>",
-  "time_period": "<period/date this fact applies to if stated, e.g. FY24, as of March 31 2024, or null>",
+  "time_period": "<period/date this fact applies to if stated, in whatever form the document uses (a fiscal year, a calendar quarter, an as-of date, a range), or null>",
   "scope": "<qualifying scope if stated, e.g. consolidated, standalone, excluding a subsidiary, or null>",
   "statement": "<one self-contained natural-language sentence stating the fact, including subject+value+period+scope so it makes sense out of context>",
   "quote": "<exact verbatim snippet, under 300 characters, copied from the page>",

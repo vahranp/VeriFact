@@ -196,3 +196,45 @@ deduplication had literally zero duplicates to remove across 304 facts. Each of 
 been a plausible-sounding paragraph in a writeup. Building them and measuring them was the only
 way to find out they were unnecessary — and the projects I'd trust are the ones that ran that
 experiment rather than the ones that assumed the answer.
+
+---
+
+## Honest self-assessment
+
+Scored as I'd score someone else's submission. This section is for my own preparation — it is
+deliberately harsher than the README, which states limitations plainly but doesn't editorialize.
+
+| Category | Score | Reasoning |
+|---|:--:|---|
+| Meets the stated requirements | 9 | All four required cases are implemented and demonstrable; facts are grounded in verified quotes; relationships are classified across and within documents. |
+| Correctness of the hard part | 8 | Case 1 (corroboration across units) is verified fixed end-to-end. Case 2's root cause was found and fixed at the extraction layer, but the specific pair is still blocked by a stale fact from before that fix. |
+| Engineering judgment | 9 | Three components were built, measured, and rejected or reverted. Profiling preceded optimization. The measured negative results are documented as prominently as the wins. |
+| Generalization | 7 | Audited clean of document-specific logic, and the mechanisms are structural rather than rule-based. But it hasn't been run end-to-end on a genuinely different document, so this rests on design argument plus targeted tests. |
+| Testing | 8 | 148 tests, LLM mocked, no Ollama needed to run them. Real-data testing caught defects the synthetic fixtures missed — and those became regression tests. Missing: fixture-based end-to-end tests of the four required cases. |
+| Performance | 8 | 20–30 min → ~4 min on a representative page, with the profile that justified each change. Full-document ingestion on dense tables is still slow on local inference. |
+| Precision of results | 5 | The weakest area. An 80% candidate→relationship storage rate is very likely over-classifying, and I have not audited it. |
+| Documentation | 9 | README leads with a diagram and the two decisions that matter; PERFORMANCE.md carries the numbers and the failures; this file covers the questions. |
+| **Overall** | **8** | Strong engineering process and honest reporting; the gap is unaudited relationship precision. |
+
+### Open issues, by severity
+
+**BLOCKER** — none. The system runs end to end and produces all four required case types.
+
+**HIGH**
+- Relationship precision is unmeasured, and the one signal I have (92/115 stored) suggests
+  over-classification. Fix: sample 40 stored relationships, label them by hand, report precision.
+
+**MEDIUM**
+- Case 2's canonical pair still resolves against a fact extracted before the page-context fix, so
+  it demonstrates the `magnitude_suspect` guard rather than the contradiction itself. Fix:
+  re-extract that page with the extraction cache cleared for the affected chunk.
+- No end-to-end regression test pinning the four required cases with fixture documents; the
+  current case scripts need a live model.
+- `UNCERTAIN` / `INSUFFICIENT_EVIDENCE` is supported in the schema but not surfaced through the
+  pipeline or UI, so a low-confidence judgment currently reads the same as a confident one.
+
+**LOW**
+- Table extraction is still linearized text; PyMuPDF's table API was tested and rejected as worse.
+- Candidate retrieval is a linear numpy scan — fine at this scale, needs an ANN index well before
+  10k documents.
+- `candidate_reason` is recorded but not yet displayed in the UI.

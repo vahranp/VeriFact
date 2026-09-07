@@ -606,6 +606,7 @@ function relCard(r) {
       ${delta(r.fact_a, r.fact_b)}
       <div class="why"><b>Reasoning:</b> ${esc(r.explanation)}</div>
       ${r.reconciliation_context ? `<div class="rctx">${I.link}<span><b>Reconciled by:</b> ${esc(r.reconciliation_context)}</span></div>` : ""}
+      ${r.candidate_reason ? `<div class="why prov"><b>Retrieved by:</b> ${esc(r.candidate_reason)}</div>` : ""}
     </div></div>`;
 }
 

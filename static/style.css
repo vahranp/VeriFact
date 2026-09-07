@@ -327,6 +327,10 @@ td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .vcmp { display: flex; align-items: center; gap: 12px; margin-top: 14px; font-family: var(--mono); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r1); padding: 10px 14px; }
 .why { margin-top: 14px; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r2); padding: 13px 15px; }
 .why b { color: var(--ink); }
+/* Retrieval provenance: why this pair was ever shortlisted for judgment.
+   Deliberately quieter than the reasoning above it -- it's diagnostic
+   detail, not the finding. */
+.why.prov { margin-top: 8px; font-size: 11.5px; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); color: var(--ink-3, var(--ink-2)); background: transparent; border-style: dashed; }
 .rctx { margin-top: 10px; font-size: 12.5px; color: var(--warn); display: flex; align-items: center; gap: 8px; background: var(--warn-soft); border: 1px solid var(--warn-border); border-radius: var(--r1); padding: 9px 13px; }
 .rctx svg { width: 13px; height: 13px; flex-shrink: 0; }
 

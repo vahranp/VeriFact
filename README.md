@@ -356,6 +356,35 @@ became visible on real data (5 identities reported, 3 of them coincidences).
 Full profiling data, the concurrency benchmarks, the model comparison, and write-ups of what
 didn't work are in **[PERFORMANCE.md](PERFORMANCE.md)**.
 
+### Generalization: how "not specific to Delhivery" is actually enforced
+
+The claim that this isn't tuned to the starter documents is easy to make and easy to violate
+accidentally, so it's checked rather than asserted:
+
+- **No fact values, entity names, filenames, or expected relationships appear anywhere in
+  `app/`.** Auditing the production package for domain terms returns only comments and docstrings
+  that *explain* a design decision using a real example — no branch, threshold, or lookup keys off
+  them. The one genuine finding was a prompt that illustrated `time_period` with "e.g. FY24",
+  which could nudge extraction toward one fiscal-year convention; it now describes the shape of
+  the field instead of naming a format.
+- **No alias dictionary.** "Net worth = total equity" is not a hardcoded synonym pair — it's
+  decided by the model in a step whose only job is that question. Adding a lookup table would
+  have fixed the two known cases and generalized to nothing.
+- **No accounting rules in the arithmetic checker.** It discovers `a + b = c` structurally. The
+  test suite includes a non-financial case (`engineering headcount + sales headcount = total
+  headcount`) that passes with no code changes, which is what demonstrates the mechanism isn't
+  secretly domain-specific.
+- **Unit normalization is table-driven over scale words** (crore, lakh, million, bn, …) rather
+  than over metric names, so it extends by adding a scale word, not by adding a document type.
+- **Test scripts were themselves de-hardcoded.** `scripts/test_case1.py` and `test_case2.py`
+  originally looked facts up by document id; they now search by content, so they keep working
+  against any re-ingest and can't accidentally pass by pointing at a known row.
+
+**What this does not prove:** the pipeline has been run end-to-end on the three starter documents
+and behaves correctly on them. It has not been validated against a document from a genuinely
+different domain at full scale, so "works on any financial document" remains a design argument
+supported by targeted tests, not an empirical result.
+
 ## Limitations and Next Steps
 
 - **Full-document ingestion is still slow with the local model**, even after this optimization
@@ -368,9 +397,18 @@ didn't work are in **[PERFORMANCE.md](PERFORMANCE.md)**.
 - **Relationship candidate retrieval is a linear scan over all embeddings in Python/numpy.** Fine
   for low thousands of facts; would need an actual vector index (FAISS/pgvector/etc.) for many
   documents at real scale — noted in the code as the specific place this would need to change.
-- **No de-duplication of near-identical facts** extracted from overlapping page chunks on very
-  long pages. Would add a cheap embedding-similarity self-check within a single document's own
-  new facts before insert.
+- **De-duplication of near-identical facts** from overlapping chunks was planned, then measured
+  and not built: across all 304 extracted facts there were **0 exact duplicates and 0
+  near-duplicates** within a document. The 150-character overlap region rarely contains a
+  complete, self-contained fact statement, so the extractor doesn't in practice emit one twice.
+  If a document type appears where it does, the check is a cheap embedding self-comparison over
+  one document's own new facts before insert.
+- **Relationship precision hasn't been quantified, and this is the weakest claim in the project.**
+  On one document 92 of 115 candidate pairs were stored as relationships — an 80% hit rate that
+  is almost certainly too high, meaning some pairs are likely labelled as corroborating when they
+  are merely topically related. `relationships.candidate_reason` now records why each pair was
+  retrieved, which is the mechanism needed to audit this, but the manual audit has not been done.
+  I'd rather state that than quote a precision figure I haven't measured.
 - **Schema evolves at the field level (attribute is open-vocabulary), not the table level.** A
   fact needing a genuinely new *column* (not just a new `attribute` value) — e.g. a geographic
   coordinate pair — isn't supported yet. Next step: an optional `extra_json` column for
