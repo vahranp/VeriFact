@@ -8,51 +8,112 @@
 </head>
 <body>
 <header>
-  <div>
-    <h1>Fact Knowledge Layer</h1>
-    <div class="sub">Upload a PDF, extract facts, see what corroborates / contradicts / reconciles across documents.</div>
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    </div>
+    <div>
+      <h1>Fact Knowledge Layer</h1>
+      <div class="sub">Extract, ground, and cross-check facts across documents</div>
+    </div>
   </div>
   <div class="stats" id="stats"></div>
 </header>
 
 <nav>
-  <button data-view="upload" class="active">Upload</button>
-  <button data-view="documents">Documents</button>
-  <button data-view="facts">Facts</button>
-  <button data-view="relationships">Relationships</button>
-  <button data-view="issues">Extraction Issues</button>
+  <button data-view="upload" class="active">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    Upload
+  </button>
+  <button data-view="documents">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    Documents
+  </button>
+  <button data-view="facts">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+    Facts
+  </button>
+  <button data-view="relationships">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 7.5L15.5 16.5"/></svg>
+    Relationships
+  </button>
+  <button data-view="issues">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    Extraction Issues
+  </button>
 </nav>
 
 <main>
 
   <section id="view-upload" class="view active">
-    <div class="card upload-card">
-      <input type="file" id="pdfInput" accept="application/pdf" />
-      <label class="small">max pages&nbsp;<input type="number" id="maxPages" min="1" placeholder="all" style="width:70px" /></label>
-      <label class="small">or specific pages&nbsp;<input type="text" id="pagesSpec" placeholder="e.g. 1,3,7-10" style="width:120px" /></label>
-      <button class="primary" id="uploadBtn">Upload &amp; process</button>
+    <div class="dropzone" id="dropzone">
+      <div class="dz-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      </div>
+      <div class="dz-title">Drop a PDF here, or click to browse</div>
+      <div class="dz-sub">Any PDF works — nothing here is tuned to a specific document type</div>
+      <input type="file" id="pdfInput" accept="application/pdf" style="display:none" />
+      <div id="fileChip"></div>
+    </div>
+
+    <div class="upload-options">
+      <div class="field">
+        <label>Max pages</label>
+        <input type="number" id="maxPages" min="1" placeholder="all pages" />
+      </div>
+      <div class="field grow">
+        <label>Specific pages</label>
+        <input type="text" id="pagesSpec" placeholder="e.g. 1,3,7-10" />
+        <div class="hint">Optional — target exact pages of a large PDF instead of processing all of it</div>
+      </div>
+    </div>
+
+    <div class="upload-actions">
+      <button class="primary" id="uploadBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Upload &amp; process
+      </button>
       <span class="small" id="uploadStatus"></span>
     </div>
-    <div class="card">
-      <div class="small">What happens on upload: the PDF is split into pages, each page is sent to an LLM to
-      extract facts grounded in an exact quote from that page, each fact is embedded locally, and then compared
-      against every existing fact in the knowledge layer (via embedding similarity + LLM judgement) to find
-      corroborations, contradictions, and context-reconciled differences. Processing runs in the background —
-      switch to the Documents tab to watch status.</div>
+
+    <div class="section-title">How it works</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-title">Extract, page by page</div>
+        <div class="step-desc">Each page is sent to a local LLM, which decides what's checkable and grounds every claim in an exact quote.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-title">Verify grounding</div>
+        <div class="step-desc">Every quote is checked in code against the source page — not just trusted from the model.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-title">Shortlist candidates</div>
+        <div class="step-desc">Local embeddings cheaply find which facts might relate to each other, before spending an LLM call.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-title">Judge the relationship</div>
+        <div class="step-desc">Shortlisted pairs get one LLM call each: corroborates, contradicts, reconciled, or unrelated — with reasoning.</div>
+      </div>
     </div>
   </section>
 
   <section id="view-documents" class="view">
-    <table>
-      <thead><tr><th>Document</th><th>Status</th><th>Pages</th><th>Facts</th><th>Uploaded</th><th></th><th></th></tr></thead>
-      <tbody id="documentsBody"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Document</th><th>Status</th><th>Pages</th><th>Facts</th><th>Uploaded</th><th></th><th></th></tr></thead>
+        <tbody id="documentsBody"></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="view-facts" class="view">
     <div class="filters">
       <select id="factDocFilter"><option value="">All documents</option></select>
-      <input type="text" id="factSearch" placeholder="search statement / subject / attribute" />
+      <input type="text" id="factSearch" placeholder="Search statement / subject / attribute" />
     </div>
     <div id="factsList"></div>
   </section>
@@ -70,14 +131,18 @@
   </section>
 
   <section id="view-issues" class="view">
-    <div class="small" style="margin-bottom:10px;">Things the extraction pipeline itself flagged as uncertain or
-    failed — a quote the model produced that couldn't be found verbatim on the page, a response that failed to
-    parse as JSON, a comparison call that errored, etc. This is the system's own record of where it isn't sure of
-    itself, not a hidden failure.</div>
-    <table>
-      <thead><tr><th>Document</th><th>Page</th><th>Issue</th><th>Detail</th></tr></thead>
-      <tbody id="issuesBody"></tbody>
-    </table>
+    <div class="card small" style="margin-bottom:16px;">
+      Things the extraction pipeline itself flagged as uncertain or failed — a quote the model produced
+      that couldn't be found verbatim on the page, a response that failed to parse as JSON, a comparison
+      call that errored, etc. This is the system's own record of where it isn't sure of itself, not a
+      hidden failure.
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Document</th><th>Page</th><th>Issue</th><th>Detail</th></tr></thead>
+        <tbody id="issuesBody"></tbody>
+      </table>
+    </div>
   </section>
 
 </main>
