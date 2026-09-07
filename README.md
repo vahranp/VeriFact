@@ -403,12 +403,13 @@ supported by targeted tests, not an empirical result.
   complete, self-contained fact statement, so the extractor doesn't in practice emit one twice.
   If a document type appears where it does, the check is a cheap embedding self-comparison over
   one document's own new facts before insert.
-- **Relationship precision hasn't been quantified, and this is the weakest claim in the project.**
-  On one document 92 of 115 candidate pairs were stored as relationships — an 80% hit rate that
-  is almost certainly too high, meaning some pairs are likely labelled as corroborating when they
-  are merely topically related. `relationships.candidate_reason` now records why each pair was
-  retrieved, which is the mechanism needed to audit this, but the manual audit has not been done.
-  I'd rather state that than quote a precision figure I haven't measured.
+- **Relationship precision is verified on one document, not across the corpus.** Reviewing the
+  Relationships view surfaced a real error class — different revenue *segments* being reported as
+  contradicting each other — which was traced to conflicting instructions inside the metric
+  prompt and fixed (see [PERFORMANCE.md](PERFORMANCE.md)). Re-judging that document's 30 stored
+  relationships dropped 15, all individually verified as false positives, with 0 legitimate
+  relationships relabelled. `scripts/audit_precision.py` runs this audit for any document, but it
+  has only been run on one, so the fix is validated rather than proven general.
 - **Schema evolves at the field level (attribute is open-vocabulary), not the table level.** A
   fact needing a genuinely new *column* (not just a new `attribute` value) — e.g. a geographic
   coordinate pair — isn't supported yet. Next step: an optional `extra_json` column for

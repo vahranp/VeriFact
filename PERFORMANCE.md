@@ -287,3 +287,72 @@ component with no measured work to do. It wasn't built.
 (Repeated facts *across* documents are not duplicates — that's the corroboration signal the system
 exists to find. Re-uploading an identical file is already prevented by the document-level content
 hash.)
+
+## Fixed after UI review: false contradictions between segments
+
+Reading the Relationships view on a live document surfaced a class of error no automated check
+had caught, because each individual judgment looked well-reasoned:
+
+> "Delhivery's Cross Border revenue in FY23 was ₹4,552 crore" **contradicts**
+> "Delhivery's revenue from services in FY23 was ₹663 crore" — *confidence 1.00*
+
+Those are different revenue **segments**, not two conflicting reports of one figure. Step 1
+("are these the same metric?") was answering yes because both are revenue.
+
+The root cause was a contradiction inside the prompt itself. It listed `"revenue from services"`
+as an unconditional synonym for `"revenue"` — so when a segment rule was added alongside it,
+nothing changed: the two instructions conflicted, and the model followed the more specific
+synonym example over the general rule.
+
+The fix restructures the metric prompt into two ordered stages and makes the model emit
+`slice_a` / `slice_b` **before** its verdict, so the aggregation-level check can't be skipped
+silently. Synonym guidance is now explicitly scoped to pairs whose slices already match.
+
+| pair | before | after |
+|---|---|---|
+| cross border revenue vs revenue from services | contradicts | **unrelated** |
+| PTL freight revenue vs revenue from services | contradicts | **unrelated** |
+| cross border revenue vs PTL freight revenue | contradicts | **unrelated** |
+| cross border revenue FY24 vs FY23 | reconciled | **reconciled** |
+| Case 1 corroboration (₹8,142 Cr vs ₹81,415.38M) | corroborates 1.00 | **corroborates 1.00** |
+
+The last two rows are the ones that matter. A "fix" that labelled everything `unrelated` would
+score identically on the first three and be worthless — the same-segment/different-year pair must
+still reconcile, and the cross-unit corroboration must still corroborate.
+
+Four tests now pin the prompt invariants this violated, including one asserting that the synonym
+examples appear *after* the clause scoping them to slice-matching pairs — an ordering constraint,
+which is the actual thing that broke.
+
+**Process note:** this was found by looking at the output, not by a test. The failure mode is
+invisible to a test suite that mocks the LLM, and each individual explanation read as sound. It's
+the strongest argument in this project for rendering results in a form a human will actually
+review.
+
+### Measured precision impact
+
+Re-judging all 30 stored relationships on that document under the corrected prompt
+(`scripts/audit_precision.py`):
+
+| | before | after |
+|---|---:|---:|
+| candidate pairs evaluated | 53 | 53 |
+| stored as relationships | 30 (57%) | **15 (28%)** |
+| dropped as unrelated | — | 15 |
+| **relabelled into a different relation type** | — | **0** |
+
+All 15 drops were inspected individually and every one is a genuine false positive:
+
+- `Express Parcel revenue` vs `Cross Border revenue` — two segments (this one had been stored as
+  **corroborates**, so the error class was producing false agreements as well as false conflicts)
+- `PTL freight revenue` vs `revenue from services` — segment vs total
+- `Express Parcel shipments` vs `PTL freight tonnage` — different segments *and* different units
+- `revenue growth YoY` vs `revenue growth YoY for Express Parcel` — whole vs part
+
+That last group is the sharpest test. The document reports overall revenue growth alongside
+per-segment revenue growth, so the attribute strings differ only by a trailing qualifier. Getting
+those right requires the aggregation-level check to actually fire, rather than the model pattern-
+matching on the shared prefix.
+
+The 0 in the relabelled row is what makes this a precision fix rather than a threshold change:
+no relationship that should exist was reclassified into the wrong type.

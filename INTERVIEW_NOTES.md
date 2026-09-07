@@ -197,6 +197,32 @@ been a plausible-sounding paragraph in a writeup. Building them and measuring th
 way to find out they were unnecessary — and the projects I'd trust are the ones that ran that
 experiment rather than the ones that assumed the answer.
 
+### 21. What's the worst bug you shipped, and how did you find it?
+
+Confident false contradictions between different revenue segments:
+
+> "Cross Border revenue FY23 was ₹4,552 crore" **contradicts** "revenue from services FY23 was
+> ₹663 crore" — confidence 1.00
+
+Those are different segments, not conflicting reports of one number. I found it by **looking at
+the UI**, not from a test. That's the uncomfortable part: every individual explanation read as
+sound, and the failure is invisible to a test suite that mocks the LLM.
+
+The root cause was a contradiction inside my own prompt. It listed "revenue from services" as an
+unconditional synonym for "revenue". So when I added a rule saying "different segments are
+different metrics", nothing changed — the two instructions conflicted, and the model reasonably
+followed the more specific synonym example over the general rule. My first fix did nothing, and
+that told me more than the bug did.
+
+The real fix makes the model emit `slice_a` / `slice_b` **before** its verdict, so the
+aggregation-level check can't be skipped, and scopes the synonym guidance to pairs whose slices
+already match.
+
+The check I care about is the pair that *didn't* change: cross-border revenue FY24 vs FY23 still
+resolves as `reconciled`, and Case 1 still corroborates at 1.0. A "fix" that labelled everything
+`unrelated` would have looked identical on the failing cases and been worthless.
+
+
 ---
 
 ## Honest self-assessment
@@ -212,17 +238,19 @@ deliberately harsher than the README, which states limitations plainly but doesn
 | Generalization | 7 | Audited clean of document-specific logic, and the mechanisms are structural rather than rule-based. But it hasn't been run end-to-end on a genuinely different document, so this rests on design argument plus targeted tests. |
 | Testing | 8 | 148 tests, LLM mocked, no Ollama needed to run them. Real-data testing caught defects the synthetic fixtures missed — and those became regression tests. Missing: fixture-based end-to-end tests of the four required cases. |
 | Performance | 8 | 20–30 min → ~4 min on a representative page, with the profile that justified each change. Full-document ingestion on dense tables is still slow on local inference. |
-| Precision of results | 5 | The weakest area. An 80% candidate→relationship storage rate is very likely over-classifying, and I have not audited it. |
+| Precision of results | 7 | Audited after a UI review exposed false contradictions between revenue segments. Re-judging 30 stored relationships dropped 15 — all verified false positives — with 0 relabelled. Storage rate fell 57% → 28%. Still only audited on one document. |
 | Documentation | 9 | README leads with a diagram and the two decisions that matter; PERFORMANCE.md carries the numbers and the failures; this file covers the questions. |
-| **Overall** | **8** | Strong engineering process and honest reporting; the gap is unaudited relationship precision. |
+| **Overall** | **8** | Strong engineering process and honest reporting; the remaining gap is that precision is verified on one document, not across the corpus. |
 
 ### Open issues, by severity
 
 **BLOCKER** — none. The system runs end to end and produces all four required case types.
 
 **HIGH**
-- Relationship precision is unmeasured, and the one signal I have (92/115 stored) suggests
-  over-classification. Fix: sample 40 stored relationships, label them by hand, report precision.
+- Precision has been audited on one document only (30 relationships, 15 false positives removed,
+  0 legitimate ones lost). The same audit has not been run across the whole corpus, so the
+  segment/aggregation fix is validated but not yet shown to hold generally. Fix: run
+  `scripts/audit_precision.py` over every document and report the aggregate.
 
 **MEDIUM**
 - Case 2's canonical pair still resolves against a fact extracted before the page-context fix, so
