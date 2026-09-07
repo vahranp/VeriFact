@@ -112,6 +112,11 @@ def list_documents():
         source_id = d.get("reused_from_document_id") or d["id"]
         d["fact_count"] = counts.get(source_id, 0)
         _pop_progress(d)
+        # Parsed stats are included here (not just on the detail endpoint) so
+        # the overview dashboard can aggregate pipeline totals from one request
+        # instead of fetching every document individually.
+        stats_json = d.pop("stats_json", None)
+        d["stats"] = json.loads(stats_json) if stats_json else None
     return docs
 
 
