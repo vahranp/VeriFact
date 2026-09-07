@@ -105,10 +105,18 @@ def _call_openai_compatible(model: str, system: str, user: str, temperature: flo
 
 
 def chat_json(model: str, system: str, user: str, temperature: float = 0.0,
-              max_retries: int = 3, timeout: float = 180.0, max_tokens: int = 1500):
+              max_retries: int = 2, timeout: float = 180.0, max_tokens: int = 1500):
     """Calls the configured LLM backend and returns parsed JSON (list or
     dict). Raises LLMError for transport failures and LLMParseError if the
-    response can't be turned into JSON after best-effort recovery."""
+    response can't be turned into JSON after best-effort recovery.
+
+    A plain timeout is NOT retried: profiling showed this was the single
+    biggest source of wasted time (a chunk dense enough to exhaust the
+    timeout once will exhaust it again with the same payload, so the old
+    "retry twice" policy just multiplied the wasted wall-clock time by
+    max_retries for no benefit). Only errors that look transient --
+    connection failures, malformed responses -- get retried.
+    """
     caller = _call_ollama if LLM_PROVIDER == "ollama" else _call_openai_compatible
 
     content = None
@@ -117,6 +125,8 @@ def chat_json(model: str, system: str, user: str, temperature: float = 0.0,
         try:
             content = caller(model, system, user, temperature, max_tokens, timeout)
             break
+        except httpx.TimeoutException as exc:
+            raise LLMError(f"Timed out calling {model} after {timeout}s (not retried): {exc}") from exc
         except (httpx.HTTPError, LLMError, KeyError, IndexError) as exc:
             last_exc = exc
             if attempt < max_retries - 1:
@@ -124,13 +134,22 @@ def chat_json(model: str, system: str, user: str, temperature: float = 0.0,
                 continue
             raise LLMError(f"Failed calling {model} after {max_retries} attempts: {exc}") from exc
 
+    # strict=False allows raw control characters (literal tabs/newlines)
+    # inside JSON strings. The extraction prompt asks the model to copy
+    # quotes character-for-character from the source page -- and PDF table
+    # text routinely contains literal tab characters used for column
+    # alignment -- so a model doing exactly what was asked (copying a quote
+    # verbatim, tabs included) produces a technically-invalid-per-spec but
+    # completely legitimate JSON string that Python's strict-mode parser
+    # rejects. Rejecting the model's correct behavior here would be a
+    # self-inflicted failure, not a real one.
     try:
-        return json.loads(content)
+        return json.loads(content, strict=False)
     except json.JSONDecodeError:
         pass
 
     block = _extract_json_block(content)
     try:
-        return json.loads(block)
+        return json.loads(block, strict=False)
     except json.JSONDecodeError as exc:
         raise LLMParseError(f"Could not parse JSON from {model} response: {exc}", content)
