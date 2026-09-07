@@ -1,0 +1,176 @@
+"""
+Per-page fact extraction. Nothing here is specific to Delhivery, financial
+filings, or any fixed fact taxonomy -- the prompt asks the model to decide
+what counts as a "fact" on each page, which is what lets this generalize
+to unseen PDFs (per the assignment: "the documents should guide what
+counts as a fact").
+"""
+import re
+
+from app.config import EXTRACTION_MODEL
+from app.llm_client import chat_json, LLMError, LLMParseError
+from app.pdf_extract import Chunk
+
+SYSTEM_PROMPT = """You are a precise fact-extraction engine. You read one page (or page \
+fragment) from an arbitrary document -- it could be a financial filing, a report, a \
+contract, anything -- and extract every meaningful, checkable fact stated on it.
+
+A "fact" is any discrete, checkable claim: a number (revenue, a count, a percentage, a \
+date, a dimension), a status (a person's role, whether something is active/resigned/\
+approved), a relationship (X owns Y, X is located at Y), or a definition. Ignore page \
+furniture: headers, footers, page numbers, table-of-contents entries, boilerplate legal \
+disclaimers with no checkable content.
+
+For EVERY fact you extract, you must ground it in an exact verbatim quote copied \
+character-for-character from the page text you were given -- never paraphrase the quote \
+itself (you can paraphrase in the "statement" field, just not in "quote"). If you cannot \
+find exact supporting text on the page, do not invent the fact.
+
+Respond with ONLY a JSON array (no prose, no markdown fences). Each element:
+{
+  "subject": "<entity/thing the fact is about, e.g. a company, person, or product>",
+  "attribute": "<what aspect is being stated, e.g. revenue, pin-code reach, director status>",
+  "value": "<the stated value as text, keep original formatting/currency symbols>",
+  "value_numeric": <number, or null if not numeric>,
+  "unit": "<unit if applicable, e.g. INR million, %, count, or null>",
+  "time_period": "<period/date this fact applies to if stated, e.g. FY24, as of March 31 2024, or null>",
+  "scope": "<qualifying scope if stated, e.g. consolidated, standalone, excluding a subsidiary, or null>",
+  "statement": "<one self-contained natural-language sentence stating the fact, including subject+value+period+scope so it makes sense out of context>",
+  "quote": "<exact verbatim snippet, under 300 characters, copied from the page>",
+  "confidence": <0.0-1.0, how explicitly/directly the page states this>
+}
+
+Extract at most 25 of the most meaningful facts per page. Skip trivial repetition. If the \
+page has no extractable facts, return an empty array []."""
+
+
+_NULLISH = {"null", "none", "n/a", "na", ""}
+
+
+def _clean(value):
+    """Some models emit the literal string "null" instead of JSON null for
+    optional fields. Normalize those to real None so downstream filtering
+    (e.g. `if fact.get('unit')`) behaves as expected."""
+    if isinstance(value, str) and value.strip().lower() in _NULLISH:
+        return None
+    return value
+
+
+def _find_quote_offset(page_text: str, quote: str) -> int:
+    """Returns the char offset of `quote` in `page_text`, or -1. Tries an
+    exact match first, then a whitespace-normalized fuzzy match, since
+    models occasionally collapse/expand whitespace when "copying"."""
+    idx = page_text.find(quote)
+    if idx != -1:
+        return idx
+
+    norm_page = re.sub(r"\s+", " ", page_text)
+    norm_quote = re.sub(r"\s+", " ", quote).strip()
+    if not norm_quote:
+        return -1
+    return norm_page.find(norm_quote)
+
+
+def _recover_non_list_shape(raw: dict) -> tuple[list | None, str | None]:
+    """Smaller/local models occasionally emit a single JSON object instead
+    of the array we asked for -- either one fact directly, or the array
+    wrapped under some key like {"facts": [...]}. (We saw this consistently
+    when Ollama's grammar-constrained format="json" mode was enabled, which
+    is why extraction now runs unconstrained -- but this recovery stays as
+    a safety net since it can still happen occasionally either way.) Try
+    both recoveries before giving up."""
+    if not isinstance(raw, dict):
+        return None, None
+
+    if "quote" in raw and "statement" in raw:
+        return [raw], "treated the single object as a one-element fact list"
+
+    for key, value in raw.items():
+        if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+            return value, f"unwrapped array found under key '{key}'"
+
+    return None, None
+
+
+def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict]]:
+    """Returns (facts, issues). `facts` have a 'quote_grounded' bool added.
+    `issues` are dicts ready to hand to db.insert_issue (issue_type/detail/raw_excerpt)."""
+    issues: list[dict] = []
+    user_prompt = (
+        f"Document: {document_name}\nPage: {chunk.page_number}\n\n"
+        f"PAGE TEXT:\n\"\"\"\n{chunk.text}\n\"\"\""
+    )
+
+    try:
+        raw = chat_json(EXTRACTION_MODEL, SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=3000)
+    except LLMError as exc:
+        issues.append({"issue_type": "llm_call_failed", "detail": str(exc), "raw_excerpt": ""})
+        return [], issues
+    except LLMParseError as exc:
+        issues.append({"issue_type": "unparseable_response", "detail": str(exc), "raw_excerpt": exc.raw_content})
+        return [], issues
+
+    if not isinstance(raw, list):
+        original_raw = raw
+        raw, recovered_how = _recover_non_list_shape(raw)
+        if raw is None:
+            issues.append({
+                "issue_type": "unexpected_shape",
+                "detail": f"Expected a JSON array of facts, got {type(original_raw).__name__} that we couldn't recover",
+                "raw_excerpt": str(original_raw)[:1000],
+            })
+            return [], issues
+        issues.append({
+            "issue_type": "unexpected_shape_recovered",
+            "detail": (
+                "Model returned a JSON object instead of an array (a known behavior of "
+                f"grammar-constrained local JSON decoding); recovered via: {recovered_how}."
+            ),
+            "raw_excerpt": "",
+        })
+
+    facts = []
+    for item in raw:
+        if not isinstance(item, dict) or "quote" not in item or "statement" not in item:
+            issues.append({
+                "issue_type": "malformed_fact",
+                "detail": "Fact object missing required fields",
+                "raw_excerpt": str(item)[:500],
+            })
+            continue
+
+        quote = str(item.get("quote", "")).strip()
+        offset = _find_quote_offset(chunk.text, quote)
+        grounded = offset != -1
+        if not grounded:
+            issues.append({
+                "issue_type": "quote_not_grounded",
+                "detail": (
+                    f"Model's quote for fact '{item.get('statement', '')[:120]}' was not found "
+                    f"verbatim on page {chunk.page_number}; likely paraphrased instead of copied."
+                ),
+                "raw_excerpt": quote,
+            })
+
+        value_numeric = item.get("value_numeric")
+        if isinstance(value_numeric, str):
+            try:
+                value_numeric = float(value_numeric.replace(",", ""))
+            except ValueError:
+                value_numeric = None
+
+        facts.append({
+            "subject": _clean(item.get("subject")),
+            "attribute": _clean(item.get("attribute")),
+            "value": _clean(item.get("value")),
+            "value_numeric": value_numeric,
+            "unit": _clean(item.get("unit")),
+            "time_period": _clean(item.get("time_period")),
+            "scope": _clean(item.get("scope")),
+            "statement": item.get("statement"),
+            "quote": quote,
+            "quote_grounded": grounded,
+            "confidence": item.get("confidence"),
+        })
+
+    return facts, issues
