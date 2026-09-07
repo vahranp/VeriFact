@@ -238,7 +238,7 @@ deliberately harsher than the README, which states limitations plainly but doesn
 | Generalization | 7 | Audited clean of document-specific logic, and the mechanisms are structural rather than rule-based. But it hasn't been run end-to-end on a genuinely different document, so this rests on design argument plus targeted tests. |
 | Testing | 8 | 148 tests, LLM mocked, no Ollama needed to run them. Real-data testing caught defects the synthetic fixtures missed — and those became regression tests. Missing: fixture-based end-to-end tests of the four required cases. |
 | Performance | 8 | 20–30 min → ~4 min on a representative page, with the profile that justified each change. Full-document ingestion on dense tables is still slow on local inference. |
-| Precision of results | 7 | Audited after a UI review exposed false contradictions between revenue segments. Re-judging 30 stored relationships dropped 15 — all verified false positives — with 0 relabelled. Storage rate fell 57% → 28%. Still only audited on one document. |
+| Precision of results | 8 | Audited corpus-wide: 490 → 348 relationships, 142 false positives removed, 33 relabelled — all 33 toward the more careful label, none away. Surviving contradictions are ones a reviewer would want (including a transposed pair of director DINs). Not yet checked against a human-labelled ground truth. |
 | Documentation | 9 | README leads with a diagram and the two decisions that matter; PERFORMANCE.md carries the numbers and the failures; this file covers the questions. |
 | **Overall** | **8** | Strong engineering process and honest reporting; the remaining gap is that precision is verified on one document, not across the corpus. |
 
@@ -247,10 +247,10 @@ deliberately harsher than the README, which states limitations plainly but doesn
 **BLOCKER** — none. The system runs end to end and produces all four required case types.
 
 **HIGH**
-- Precision has been audited on one document only (30 relationships, 15 false positives removed,
-  0 legitimate ones lost). The same audit has not been run across the whole corpus, so the
-  segment/aggregation fix is validated but not yet shown to hold generally. Fix: run
-  `scripts/audit_precision.py` over every document and report the aggregate.
+- Precision is measured by *self-consistency* — re-judging under the corrected prompt — not
+  against human labels. The corpus-wide audit removed 142 false positives and relabelled 33, all
+  in the more careful direction, which is strong evidence but not ground truth. Fix: hand-label a
+  sample of 40 surviving relationships and report true precision.
 
 **MEDIUM**
 - Case 2's canonical pair still resolves against a fact extracted before the page-context fix, so

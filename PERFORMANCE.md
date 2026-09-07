@@ -356,3 +356,45 @@ matching on the shared prefix.
 
 The 0 in the relabelled row is what makes this a precision fix rather than a threshold change:
 no relationship that should exist was reclassified into the wrong type.
+
+### Corpus-wide audit result
+
+The same audit was then run across every stored relationship
+(`python scripts/audit_precision.py --apply`):
+
+| | before | after |
+|---|---:|---:|
+| stored relationships | 490 | **348** |
+| dropped as unrelated | — | 142 (29%) |
+| relabelled | — | 33 |
+| errors | — | 0 |
+
+The 33 relabels all move toward the more careful classification, never away from it:
+
+| transition | count | reading |
+|---|---:|---|
+| `corroborates` → `reconciled` | 26 | values that differ for a stated reason were being reported as agreeing |
+| `contradicts` → `reconciled` | 6 | a reconciling context was found instead of an unexplained conflict |
+| `corroborates` → `contradicts` | 1 | a real disagreement had been reported as agreement |
+
+Not every drop was a revenue segment. The slice rule generalizes to other kinds of breakdown
+without any change: `gateway infrastructure in Bhiwandi` vs `in Bengaluru` (facilities),
+`number of sortation centres` vs `Rated Automated Sort Capacity` (different measures of one
+network), `retirement status` vs `reappointment status` (sequential steps of one governance
+process, not one metric).
+
+**What survived is the point.** The contradictions still standing are ones a human reviewer would
+want to see:
+
+- `loss per equity share FY24 = (3.40)` vs `= (14.09)` — same metric, same period, no stated
+  reason for the gap
+- `total other comprehensive income FY24 = 41.84` vs `= 12.30`
+- `Sahil Barua has DIN 02227607` vs `The DIN of Sahil Barua is 05131571`, together with
+  `Kapil Bharati has DIN 05131571` vs `The DIN of Kapil Bharati is 02227607` — the two directors'
+  identifiers are **transposed** between extractions, which is the signature of a column
+  misalignment in a director table
+
+That last one is worth dwelling on: the system found it by comparing facts against each other, not
+by any rule about director tables. It's also a reminder that a detected contradiction can mean the
+*extraction* was wrong rather than the document — which is exactly why these surface for review
+instead of being auto-resolved.
