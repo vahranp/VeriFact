@@ -52,6 +52,45 @@ empty array []."""
 
 _NULLISH = {"null", "none", "n/a", "na", ""}
 
+# Found via direct testing (not a hypothetical): on one real page, the
+# model reliably filled value_numeric for negative/parenthesized figures
+# ("(452)" -> -452.0) but left it null for plain positive ones ("8,142",
+# "12.7%", "1.4") even though `value` clearly states a number and `unit`
+# separately carries the scale word. Rather than trust the model's own
+# value_numeric field when it's missing, fall back to parsing the number
+# straight out of `value` -- this is exactly the kind of deterministic
+# parsing that shouldn't be left to chance in an unassisted LLM field.
+#
+# Checked as a parenthesized accounting-negative first ("(452)", "(6.3%)"
+# -- note the number sits *before* a trailing "%" and *then* the closing
+# paren, so the parenthesis check can't just look for the number
+# immediately followed by ")"), falling back to a plain signed number.
+_PAREN_NUMBER = re.compile(r"\(\s*-?[\d,]*\.?\d+\s*%?\s*\)")
+_PLAIN_NUMBER = re.compile(r"-?[\d,]*\.?\d+")
+
+
+def _numeric_fallback(value) -> float | None:
+    if value is None:
+        return None
+    s = str(value)
+
+    paren_match = _PAREN_NUMBER.search(s)
+    if paren_match:
+        inner = _PLAIN_NUMBER.search(paren_match.group(0))
+        if inner:
+            try:
+                return -abs(float(inner.group(0).replace(",", "")))
+            except ValueError:
+                pass
+
+    plain_match = _PLAIN_NUMBER.search(s)
+    if not plain_match:
+        return None
+    try:
+        return float(plain_match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
 
 def _clean(value):
     """Some models emit the literal string "null" instead of JSON null for
@@ -109,15 +148,28 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
     different file that happens to contain identical text. Changing
     EXTRACTION_MODEL or SYSTEM_PROMPT changes the hash, so a prompt/model
     change can never silently serve a stale cached answer."""
-    chunk_hash = hash_text(EXTRACTION_MODEL, SYSTEM_PROMPT, chunk.text)
+    # page_context is part of the key: it changes the prompt, so two chunks
+    # with identical text but different surrounding page context are
+    # genuinely different questions and must not share a cached answer.
+    chunk_hash = hash_text(EXTRACTION_MODEL, SYSTEM_PROMPT, chunk.text, chunk.page_context)
     cached = db.get_cached_extraction(chunk_hash)
     if cached is not None:
         return cached["facts"], cached["issues"], True
 
     issues: list[dict] = []
+    context_block = ""
+    if chunk.page_context:
+        context_block = (
+            "PAGE HEADER CONTEXT -- this is the top of the same page, provided ONLY so you can "
+            "interpret units, currency, denominations and reporting periods correctly (e.g. a table "
+            "stating 'all amounts in millions'). Do NOT extract facts from this section, and do NOT "
+            "quote from it:\n"
+            f"\"\"\"\n{chunk.page_context}\n\"\"\"\n\n"
+        )
     user_prompt = (
         f"Document: {document_name}\nPage: {chunk.page_number}\n\n"
-        f"PAGE TEXT:\n\"\"\"\n{chunk.text}\n\"\"\""
+        f"{context_block}"
+        f"PAGE TEXT (extract facts from this section only):\n\"\"\"\n{chunk.text}\n\"\"\""
     )
 
     try:
@@ -178,6 +230,8 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
                 value_numeric = float(value_numeric.replace(",", ""))
             except ValueError:
                 value_numeric = None
+        if value_numeric is None:
+            value_numeric = _numeric_fallback(item.get("value"))
 
         facts.append({
             "subject": _clean(item.get("subject")),

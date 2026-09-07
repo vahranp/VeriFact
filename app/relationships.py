@@ -4,6 +4,19 @@ come from embedding similarity (cheap, local); only candidates above the
 threshold get an actual LLM call, and only *new* facts get compared at
 all -- this is what makes ingesting document N+1 not re-scan documents
 1..N against each other.
+
+Classification is deliberately split into two LLM calls instead of one
+combined judgment (see classify_pair below) after direct testing showed a
+single-call approach reliably fails at exactly the point where the two
+sub-questions interact: a model can correctly recognize "net worth" and
+"total equity" as the same accounting concept, and separately can do
+unit conversion when asked directly, but asked to do BOTH inside one
+judgment it sometimes recognizes the concepts as equivalent and then
+fails to notice the values actually disagree. Splitting "are these the
+same metric?" from "given a deterministic value comparison, how do they
+relate?" -- and handing the second step a normalized comparison computed
+in code (app/normalize.py) rather than asking it to convert crore to
+million itself -- removes both failure points from a single call.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,61 +29,70 @@ from app.config import (
 )
 from app.embeddings import top_k_similar
 from app.llm_client import chat_json, LLMError, LLMParseError
+from app.normalize import compare_values, format_comparison_for_prompt
 
-SYSTEM_PROMPT = """You compare two facts, each extracted from a document, to decide how they \
-relate to each other. Both facts are given with their supporting quote, source document, \
-page, time period and scope (any of which may be unknown/null).
+# ---------------------------------------------------------------- step 1 --
 
-Default to "unrelated" unless the two facts are clearly asserting something about the exact \
-same real-world claim (same subject, same underlying attribute/metric/status). Judge \
-"same underlying attribute" by real-world meaning, not by whether the attribute labels are \
-worded identically: business and accounting terminology routinely uses several different \
-words for one concept depending on the document/author (e.g. "net worth" = "total equity" = \
+SYSTEM_PROMPT_METRIC = """You are given two facts extracted from documents. Decide ONLY whether they \
+are asserting something about the exact same underlying real-world metric or attribute -- NOT \
+whether their values agree or disagree. That numeric comparison, if relevant, happens in a \
+separate step after this one, so do not consider the values at all here.
+
+Judge "same metric" by real-world meaning, not by whether the attribute labels are worded \
+identically: business and accounting terminology routinely uses several different words for \
+one concept depending on the document/author (e.g. "net worth" = "total equity" = \
 "shareholders' equity"; "revenue" = "revenue from operations" = "revenue from services" = \
 "turnover" = "sales", especially for a company whose core business already IS providing a \
 service; "gross merchandise value" = "GMV"). When two facts' attributes could plausibly be \
-different names for the same metric, do NOT default to "unrelated" on wording alone -- \
-compare their actual values as you would for any same-metric pair, and let the comparison of \
-those values (not the attribute strings) drive whether the result is corroborates, \
-contradicts, or reconciled. Only fall back to "unrelated" once you've actually considered \
-whether the values agree, disagree, or are explained by a scope/time/unit difference. Two \
-facts about the same person or company are NOT automatically related just \
-because they mention that person/company, though -- e.g. "eligible for re-appointment as \
-director" and "retires by rotation at the AGM" are routine, complementary steps of the same \
-standard governance process, not competing claims, and must NOT be marked contradicts or \
-reconciled. Likewise, two facts that are simply about different things (different specific \
-metrics, different locations, different subsidiaries) are "unrelated" even if superficially \
-similar in wording -- do not strain to find a relationship between facts that merely mention \
-overlapping words.
+different names for the same metric, answer yes.
+
+But two facts about the same person, company, or subject are NOT automatically the same metric \
+just because they share a subject -- check whether they measure the SAME aspect of that \
+subject, not merely mention it. For example, "liable to retire by rotation" and "eligible for \
+re-appointment" are two DIFFERENT attributes of one person's director status (routine, \
+sequential steps of the same governance process, not the same measurement) -- answer no. \
+Likewise "declaration of independence" and "registration in a director databank" are two \
+different regulatory requirements, not the same metric -- answer no. And two facts about \
+physically different things (a warehouse in one city vs. a warehouse in another city; one \
+company's stake in one investee vs. its stake in a different investee) are not the same metric \
+merely because they share a similar sentence structure -- answer no.
+
+Respond with ONLY this JSON object:
+{
+  "same_metric": true | false,
+  "reason": "<one sentence: what specific metric they share, or why they differ>"
+}"""
+
+# ---------------------------------------------------------------- step 2 --
+
+SYSTEM_PROMPT_JUDGE = """Two facts have already been confirmed to describe the SAME underlying \
+metric or attribute -- your job now is only to decide HOW they relate: do the stated values \
+agree, disagree without explanation, or disagree for a reconcilable reason (different time \
+period, scope, or unit)?
+
+A deterministic numeric comparison is provided below whenever both facts had a parseable value \
+and unit -- trust it over your own arithmetic; do not recompute or second-guess the unit \
+conversion it already did. If it reports the comparison was not possible (e.g. a \
+qualitative/status fact, or units that don't reduce to a common base), judge agreement from the \
+statements and quotes directly instead.
 
 Decide exactly one relation_type:
-- "corroborates": both facts state the same real-world fact. They may be worded \
-differently, use different units, or come from different documents, but they agree.
-- "contradicts": the facts are unambiguously about the same real-world subject, attribute, \
-time period AND scope, but state incompatible values or statuses, and there is no clear \
-explanation (different time / scope / unit / definition) that would reconcile them. Before \
-choosing this, explicitly check: could these two statements both be true at once (e.g. as \
-sequential steps of one process, or as different aspects of the same situation)? If so, it \
-is not a contradiction. Flag it even if you are only fairly confident, not certain -- a \
-likely contradiction still counts, say so via a lower confidence score -- but only after \
-ruling out that both facts could simply be true together.
-- "reconciled": the facts genuinely appear to conflict at first glance, AND the conflict is \
-fully explained by a different time period, different scope (e.g. standalone vs \
-consolidated, including vs excluding a subsidiary, before vs after an acquisition), \
-different units, or different definitions of a similarly-named metric. You MUST name the \
-specific reconciling context. Do not use this category for facts that were never really in \
-tension to begin with (see "unrelated" above) -- reconciled is for resolving a real apparent \
-conflict, not for connecting any two facts that share a topic.
-- "unrelated": the two facts are not actually about the same underlying real-world fact \
-(e.g. same company but a genuinely different metric, a similar-sounding but different \
-entity, or two non-competing facts about the same subject like sequential process steps) -- \
-they were only paired because the wording looked superficially similar. When in doubt, \
-choose this.
+- "corroborates": the values agree (directly, or per the normalized comparison below) for the \
+same time period and scope -- or, for non-numeric facts, the statements assert the same status.
+- "contradicts": the values disagree (directly, or per the normalized comparison below), AND \
+the time period, scope, and unit are the same or not distinguishing -- there is no stated reason \
+the numbers should differ. Flag this even at moderate confidence rather than defaulting away \
+from it once a real, unexplained disagreement is in front of you.
+- "reconciled": the values disagree, BUT a difference in time period, scope (e.g. standalone \
+vs. consolidated, before vs. after an acquisition), or definition explains the gap. You MUST \
+name the specific reconciling context.
+- "unrelated": on reflection the two facts don't actually support a comparison after all (e.g. \
+no numeric comparison was possible and the statements are too different to judge qualitatively).
 
-Respond with ONLY this JSON object, nothing else:
+Respond with ONLY this JSON object:
 {
   "relation_type": "corroborates" | "contradicts" | "reconciled" | "unrelated",
-  "explanation": "<1-3 sentences citing the specific values/wording that drove your decision>",
+  "explanation": "<1-3 sentences citing the specific values, the normalized comparison, or the reconciling context>",
   "reconciliation_context": "<required if reconciled, else null>",
   "confidence": <0.0-1.0>
 }"""
@@ -90,25 +112,90 @@ def _fact_block(label: str, fact: dict, document_name: str) -> str:
     )
 
 
-def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) -> tuple[dict, bool]:
-    """Returns (result, cache_hit). Cache key is content-based (see
-    hash_fact_pair) and order-independent, so (A, B) and (B, A) -- and the
-    same underlying claim re-extracted into a different document -- hit the
-    same entry. Changing REASONING_MODEL or SYSTEM_PROMPT changes the hash,
-    so a prompt/model change can't silently serve a stale judgment."""
-    pair_hash = hash_text(REASONING_MODEL, SYSTEM_PROMPT, hash_fact_pair(fact_a, fact_b))
+def classify_metric_match(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) -> tuple[dict, bool]:
+    """Step 1: do these two facts denote the same real-world metric? Cached
+    separately from step 2 (different prompt, different question) under
+    its own hash namespace, so it survives independently of whatever the
+    final judge prompt does."""
+    pair_hash = hash_text(REASONING_MODEL, "step1_metric", SYSTEM_PROMPT_METRIC, hash_fact_pair(fact_a, fact_b))
+    cached = db.get_cached_relationship(pair_hash)
+    if cached is not None:
+        return cached, True
+
+    user_prompt = _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" + _fact_block("FACT B", fact_b, doc_b_name)
+    result = chat_json(REASONING_MODEL, SYSTEM_PROMPT_METRIC, user_prompt, temperature=0.0,
+                        max_tokens=250, timeout=REASONING_TIMEOUT_SECONDS)
+    db.set_cached_relationship(pair_hash, REASONING_MODEL, result)
+    return result, False
+
+
+def classify_relation(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str,
+                       comparison_line: str) -> tuple[dict, bool]:
+    """Step 2: given the two facts already share a metric, and given a
+    deterministic normalized-value comparison computed in code (not by the
+    model), decide corroborates / contradicts / reconciled / unrelated.
+    The comparison line is part of the cache key so a normalize.py bugfix
+    that changes the computed comparison can't silently serve a stale
+    judgment made under the old (wrong) comparison."""
+    pair_hash = hash_text(REASONING_MODEL, "step2_judge", SYSTEM_PROMPT_JUDGE,
+                           hash_fact_pair(fact_a, fact_b), comparison_line)
     cached = db.get_cached_relationship(pair_hash)
     if cached is not None:
         return cached, True
 
     user_prompt = (
         _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" +
-        _fact_block("FACT B", fact_b, doc_b_name)
+        _fact_block("FACT B", fact_b, doc_b_name) + "\n\n" +
+        comparison_line
     )
-    result = chat_json(REASONING_MODEL, SYSTEM_PROMPT, user_prompt, temperature=0.0,
-                        max_tokens=500, timeout=REASONING_TIMEOUT_SECONDS)
+    result = chat_json(REASONING_MODEL, SYSTEM_PROMPT_JUDGE, user_prompt, temperature=0.0,
+                        max_tokens=400, timeout=REASONING_TIMEOUT_SECONDS)
     db.set_cached_relationship(pair_hash, REASONING_MODEL, result)
     return result, False
+
+
+def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) -> tuple[dict, bool]:
+    """Public entry point, kept at the same (result, cache_hit) shape as
+    the original single-call version so existing callers -- including
+    scripts/test_case1.py, test_case2.py, and retest_relationships.py --
+    don't need to change to serve as before/after regression checks
+    across this exact refactor.
+
+    Internally runs up to two LLM calls (see module docstring for why).
+    Step 2 is skipped entirely when step 1 says the facts aren't the same
+    metric -- the common case (most candidate pairs are unrelated), so
+    this doesn't double the call count for pairs that were never going to
+    match anyway. `result["_meta"]` carries granular step/call-count
+    information for the caller's stats (see build_relationships_for_document)
+    without changing the public field shape relation_type/explanation/
+    reconciliation_context/confidence that callers already expect."""
+    metric_result, metric_cached = classify_metric_match(fact_a, doc_a_name, fact_b, doc_b_name)
+
+    if not metric_result.get("same_metric"):
+        result = {
+            "relation_type": "unrelated",
+            "explanation": metric_result.get("reason") or "The two facts do not describe the same underlying metric.",
+            "reconciliation_context": None,
+            "confidence": metric_result.get("confidence"),
+            "_meta": {"steps_run": 1, "llm_calls": 0 if metric_cached else 1, "same_metric": False},
+        }
+        return result, metric_cached
+
+    comparison = compare_values(
+        fact_a.get("value_numeric"), fact_a.get("unit"),
+        fact_b.get("value_numeric"), fact_b.get("unit"),
+    )
+    comparison_line = format_comparison_for_prompt(comparison)
+    judge_result, judge_cached = classify_relation(fact_a, doc_a_name, fact_b, doc_b_name, comparison_line)
+
+    result = dict(judge_result)
+    result["_meta"] = {
+        "steps_run": 2,
+        "llm_calls": (0 if metric_cached else 1) + (0 if judge_cached else 1),
+        "same_metric": True,
+        "comparison": comparison_line,
+    }
+    return result, (metric_cached and judge_cached)
 
 
 def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) -> dict:
@@ -168,6 +255,7 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
     summary = {
         "candidates_checked": len(jobs), "stored": 0, "skipped_unrelated": 0, "errors": 0,
         "llm_calls": 0, "cache_hits": 0,
+        "metric_mismatches": 0,  # step 1 said "no" -- resolved without ever reaching step 2
         "candidate_retrieval_seconds": round(candidate_retrieval_seconds, 3),
         "llm_reasoning_seconds": 0.0,
     }
@@ -201,16 +289,19 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
 
     for job, result, cache_hit, exc in results:
         fact, other, score = job
-        if cache_hit:
-            summary["cache_hits"] += 1
-        elif exc is None:
-            summary["llm_calls"] += 1
 
         if exc is not None:
             db.insert_issue(document_id, fact["page_number"], "relationship_classification_failed",
                              f"Comparing fact {fact['id']} vs {other['id']}: {exc}", "")
             summary["errors"] += 1
             continue
+
+        meta = result.pop("_meta", {})
+        summary["llm_calls"] += meta.get("llm_calls", 0 if cache_hit else 1)
+        if cache_hit:
+            summary["cache_hits"] += 1
+        if meta.get("same_metric") is False:
+            summary["metric_mismatches"] += 1
 
         relation = result.get("relation_type")
         if relation not in ("corroborates", "contradicts", "reconciled"):

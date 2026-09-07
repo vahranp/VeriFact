@@ -1,0 +1,99 @@
+"""Unit tests for cache-key derivation and PDF page/chunk handling.
+
+Cache correctness matters more than it looks: a key that ignores the
+model or prompt would silently serve stale results after a prompt fix,
+and a key that depended on fact ids rather than content would miss the
+re-extraction case entirely.
+"""
+import pytest
+
+from app.cache import hash_fact_pair, hash_text
+from app.pdf_extract import chunk_page, parse_page_spec
+
+
+class TestHashText:
+    def test_deterministic(self):
+        assert hash_text("a", "b") == hash_text("a", "b")
+
+    def test_order_matters(self):
+        assert hash_text("a", "b") != hash_text("b", "a")
+
+    def test_field_boundaries_are_unambiguous(self):
+        """Without a separator between parts, ('ab','c') and ('a','bc')
+        would collide -- which would let two different prompts share a
+        cache entry."""
+        assert hash_text("ab", "c") != hash_text("a", "bc")
+
+    def test_none_is_treated_as_empty(self):
+        assert hash_text(None) == hash_text("")
+
+
+class TestHashFactPair:
+    def _fact(self, **over):
+        base = {
+            "subject": "Company", "attribute": "revenue", "value": "100",
+            "unit": "INR million", "time_period": "FY24", "scope": "consolidated",
+            "statement": "Company revenue FY24 was INR 100 million", "quote": "revenue ... 100",
+        }
+        base.update(over)
+        return base
+
+    def test_order_independent(self):
+        """(A,B) and (B,A) are the same comparison and must share a cache
+        entry."""
+        a, b = self._fact(), self._fact(subject="Other", value="200")
+        assert hash_fact_pair(a, b) == hash_fact_pair(b, a)
+
+    def test_content_based_not_id_based(self):
+        """Two facts with identical content but different db ids (the
+        same claim re-extracted into a new document) must hash the same."""
+        a = self._fact()
+        a_copy = dict(a, id=999, document_id=42)
+        b = self._fact(subject="Other")
+        assert hash_fact_pair(a, b) == hash_fact_pair(a_copy, b)
+
+    def test_content_change_changes_hash(self):
+        a, b = self._fact(), self._fact(subject="Other")
+        assert hash_fact_pair(a, b) != hash_fact_pair(self._fact(value="999"), b)
+
+
+class TestParsePageSpec:
+    @pytest.mark.parametrize("spec,expected", [
+        ("1", {1}),
+        ("1,3", {1, 3}),
+        ("7-10", {7, 8, 9, 10}),
+        ("1,3,7-10", {1, 3, 7, 8, 9, 10}),
+        ("52,68", {52, 68}),
+        (" 4 , 6 ", {4, 6}),
+        ("5-5", {5}),
+        ("0052", {52}),
+    ])
+    def test_selector_forms(self, spec, expected):
+        assert parse_page_spec(spec) == expected
+
+    def test_empty_segments_ignored(self):
+        assert parse_page_spec("1,,3,") == {1, 3}
+
+
+class TestChunkPage:
+    def test_short_page_is_one_chunk(self):
+        chunks = chunk_page(1, "short text")
+        assert len(chunks) == 1
+        assert chunks[0].page_number == 1
+        assert chunks[0].text == "short text"
+
+    def test_long_page_is_split_with_overlap(self):
+        from app.config import MAX_CHUNK_CHARS
+        text = "x" * (MAX_CHUNK_CHARS * 3)
+        chunks = chunk_page(7, text)
+        assert len(chunks) > 1
+        assert all(c.page_number == 7 for c in chunks)
+        # every chunk stays within the configured size
+        assert all(len(c.text) <= MAX_CHUNK_CHARS for c in chunks)
+        # reassembling covers the whole page (overlap means >= original)
+        assert sum(len(c.text) for c in chunks) >= len(text)
+
+    def test_page_number_preserved_on_every_chunk(self):
+        from app.config import MAX_CHUNK_CHARS
+        chunks = chunk_page(52, "y" * (MAX_CHUNK_CHARS * 2))
+        assert {c.page_number for c in chunks} == {52}
