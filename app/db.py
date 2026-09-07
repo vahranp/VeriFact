@@ -128,6 +128,10 @@ def init_db():
         _ensure_column(conn, "documents", "page_selector", "TEXT")
         _ensure_column(conn, "documents", "reused_from_document_id", "INTEGER")
         _ensure_column(conn, "documents", "progress_json", "TEXT")
+        # Which retrieval signal promoted this pair to an LLM judgment
+        # (see app/candidates.py) -- makes a missed or spurious
+        # relationship traceable to the signal responsible.
+        _ensure_column(conn, "relationships", "candidate_reason", "TEXT")
 
 
 # ---------------- documents ----------------
@@ -259,15 +263,15 @@ def get_all_embeddings(exclude_document_id: Optional[int] = None) -> list[tuple[
 
 def insert_relationship(fact_id_a: int, fact_id_b: int, relation_type: str, explanation: str,
                          reconciliation_context: Optional[str], confidence: Optional[float],
-                         similarity_score: float) -> int:
+                         similarity_score: float, candidate_reason: Optional[str] = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO relationships
                (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-                confidence, similarity_score, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, similarity_score, candidate_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-             confidence, similarity_score, time.time()),
+             confidence, similarity_score, candidate_reason, time.time()),
         )
         return cur.lastrowid
 

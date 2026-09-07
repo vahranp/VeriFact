@@ -9,6 +9,7 @@ import re
 
 from app import db
 from app.cache import hash_text
+from app.schemas import validate_facts
 from app.config import EXTRACTION_MODEL, EXTRACTION_TIMEOUT_SECONDS
 from app.llm_client import chat_json, LLMError, LLMParseError
 from app.pdf_extract import Chunk
@@ -137,6 +138,48 @@ def _recover_non_list_shape(raw: dict) -> tuple[list | None, str | None]:
     return None, None
 
 
+REGROUND_PROMPT = """A fact was extracted from a page, but the quote given as its supporting \
+evidence could not be found verbatim in the page text -- the model that produced it appears to \
+have paraphrased rather than copied.
+
+Your job: find the EXACT span of the page text below that actually supports the stated fact, and \
+return it copied character-for-character. Do not paraphrase, summarise, correct spelling, fix \
+spacing, or add anything. If no span of the page genuinely supports the fact, say so instead of \
+inventing one -- a wrong quote is worse than an admitted gap.
+
+Respond with ONLY this JSON object:
+{
+  "quote": "<exact verbatim span copied from the page, or null if the page does not support the fact>",
+  "found": true | false
+}"""
+
+
+def _reground_quote(fact_statement: str, page_text: str) -> str | None:
+    """One focused retry when a quote fails the grounding check: ask the
+    model to locate the real supporting span instead of accepting a
+    paraphrase. Returns a verified-grounded quote, or None if the retry
+    also fails -- the caller then keeps the original and flags it
+    ungrounded, exactly as before. This can only ever upgrade a fact's
+    evidence, never downgrade or fabricate it: the returned quote is put
+    through the same _find_quote_offset check as the original."""
+    user_prompt = (
+        f"STATED FACT: {fact_statement}\n\n"
+        f"PAGE TEXT:\n\"\"\"\n{page_text}\n\"\"\""
+    )
+    try:
+        raw = chat_json(EXTRACTION_MODEL, REGROUND_PROMPT, user_prompt, temperature=0.0,
+                         max_tokens=400, timeout=EXTRACTION_TIMEOUT_SECONDS)
+    except (LLMError, LLMParseError):
+        return None
+    if not isinstance(raw, dict) or not raw.get("found"):
+        return None
+    candidate = raw.get("quote")
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    candidate = candidate.strip()
+    return candidate if _find_quote_offset(page_text, candidate) != -1 else None
+
+
 def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict], bool]:
     """Returns (facts, issues, cache_hit). `facts` have a 'quote_grounded'
     bool added. `issues` are dicts ready to hand to
@@ -201,46 +244,56 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
             "raw_excerpt": "",
         })
 
-    facts = []
-    for item in raw:
-        if not isinstance(item, dict) or "quote" not in item or "statement" not in item:
-            issues.append({
-                "issue_type": "malformed_fact",
-                "detail": "Fact object missing required fields",
-                "raw_excerpt": str(item)[:500],
-            })
-            continue
+    # Schema-validate before anything touches the database: a fact with no
+    # quote, or a confidence of 7.5, is rejected here rather than persisted
+    # and dealt with later (see app/schemas.py).
+    validated, schema_issues = validate_facts(raw)
+    issues.extend(schema_issues)
 
+    facts = []
+    for item in validated:
         quote = str(item.get("quote", "")).strip()
         offset = _find_quote_offset(chunk.text, quote)
         grounded = offset != -1
-        if not grounded:
-            issues.append({
-                "issue_type": "quote_not_grounded",
-                "detail": (
-                    f"Model's quote for fact '{item.get('statement', '')[:120]}' was not found "
-                    f"verbatim on page {chunk.page_number}; likely paraphrased instead of copied."
-                ),
-                "raw_excerpt": quote,
-            })
 
+        if not grounded:
+            # One focused retry before giving up on the evidence link.
+            recovered = _reground_quote(str(item.get("statement", "")), chunk.text)
+            if recovered:
+                quote, grounded = recovered, True
+                issues.append({
+                    "issue_type": "quote_regrounded",
+                    "detail": (
+                        f"Initial quote for fact '{item.get('statement', '')[:120]}' was not verbatim on "
+                        f"page {chunk.page_number}; a re-grounding retry located the real supporting text."
+                    ),
+                    "raw_excerpt": recovered[:300],
+                })
+            else:
+                issues.append({
+                    "issue_type": "quote_not_grounded",
+                    "detail": (
+                        f"Model's quote for fact '{item.get('statement', '')[:120]}' was not found "
+                        f"verbatim on page {chunk.page_number}; a re-grounding retry also failed to "
+                        f"locate supporting text, so the fact is kept but flagged unverified."
+                    ),
+                    "raw_excerpt": quote,
+                })
+
+        # Schema validation already coerced/cleaned these; the only work
+        # left is recovering a number the model declined to give us.
         value_numeric = item.get("value_numeric")
-        if isinstance(value_numeric, str):
-            try:
-                value_numeric = float(value_numeric.replace(",", ""))
-            except ValueError:
-                value_numeric = None
         if value_numeric is None:
             value_numeric = _numeric_fallback(item.get("value"))
 
         facts.append({
-            "subject": _clean(item.get("subject")),
-            "attribute": _clean(item.get("attribute")),
-            "value": _clean(item.get("value")),
+            "subject": item.get("subject"),
+            "attribute": item.get("attribute"),
+            "value": item.get("value"),
             "value_numeric": value_numeric,
-            "unit": _clean(item.get("unit")),
-            "time_period": _clean(item.get("time_period")),
-            "scope": _clean(item.get("scope")),
+            "unit": item.get("unit"),
+            "time_period": item.get("time_period"),
+            "scope": item.get("scope"),
             "statement": item.get("statement"),
             "quote": quote,
             "quote_grounded": grounded,

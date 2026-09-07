@@ -16,7 +16,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app import db
 from app.cache import hash_file
-from app.config import UPLOAD_DIR, BASE_DIR
+from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
+from app.pdf_extract import page_count, parse_page_spec
 from app.pipeline import process_document
 
 app = FastAPI(title="Fact Knowledge Layer")
@@ -62,13 +63,30 @@ async def upload_document(
         None, description='Optional explicit page selector, e.g. "1,3,7-10" (bounds spend, targets specific content).'
     ),
 ):
-    if not file.filename.lower().endswith(".pdf"):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported.")
 
     safe_name = f"{uuid.uuid4().hex}_{Path(file.filename).name}"
     dest = UPLOAD_DIR / safe_name
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
+
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_MB:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(413, f"PDF is {size_mb:.1f} MB; the limit is {MAX_UPLOAD_MB} MB.")
+
+    # Reject a file that isn't really a PDF (or is corrupt) here, with a
+    # clean 400, rather than letting the background job discover it later
+    # and fail the document asynchronously with a stack trace.
+    try:
+        total_pages = page_count(str(dest))
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "Could not read that file as a PDF -- it may be corrupt or not a real PDF.")
+    if total_pages == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "That PDF has no pages.")
 
     content_hash = hash_file(str(dest))
     page_selector = pages if pages else (f"max:{max_pages}" if max_pages is not None else None)
@@ -90,7 +108,23 @@ async def upload_document(
 
     document_id = db.insert_document(file.filename, str(dest), content_hash, page_selector)
     background_tasks.add_task(process_document, document_id, str(dest), max_pages, pages)
-    return {"id": document_id, "status": "pending"}
+
+    # Non-blocking heads-up rather than a refusal: a big unrestricted run is
+    # a legitimate thing to ask for, but on a local model it can take hours,
+    # and previously nothing said so until you noticed it still running.
+    pages_to_process = total_pages
+    if pages:
+        pages_to_process = len(parse_page_spec(pages) & set(range(1, total_pages + 1)))
+    elif max_pages is not None:
+        pages_to_process = min(max_pages, total_pages)
+
+    response = {"id": document_id, "status": "pending", "pages_to_process": pages_to_process}
+    if pages_to_process > LARGE_JOB_PAGE_WARNING:
+        response["warning"] = (
+            f"This will process {pages_to_process} pages on a local model, which can take hours. "
+            f"Consider re-uploading with a page selector (e.g. pages=1,3,7-10) to target specific content."
+        )
+    return response
 
 
 def _pop_progress(d: dict) -> dict:

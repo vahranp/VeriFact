@@ -27,9 +27,40 @@ from app.config import (
     LLM_CONCURRENCY, REASONING_MODEL, REASONING_TIMEOUT_SECONDS,
     SIMILARITY_TOP_K, SIMILARITY_THRESHOLD,
 )
+from app.candidates import score_pair
 from app.embeddings import top_k_similar
 from app.llm_client import chat_json, LLMError, LLMParseError
 from app.normalize import compare_values, format_comparison_for_prompt
+
+# How many nearest neighbours the hybrid signals get to look at.
+#
+# This was originally set to 12 -- wider than SIMILARITY_TOP_K -- on the
+# assumption that entity/lexical/numeric signals would rescue pairs the
+# embedding ranking buries. Benchmarking that assumption on 304 real
+# extracted facts (scripts/bench_candidates.py) showed it was wrong:
+#
+#     K   embedding-only   hybrid   rescued by the new signals
+#     4        786           786          0
+#     8       1573          1574          1
+#    12       2339          2340          1
+#    20       3776          3779          3
+#
+# The non-embedding signals are almost entirely subsumed by embedding
+# similarity on this corpus -- MiniLM already scores same-entity,
+# same-attribute fact pairs above the 0.40 threshold, so entity and
+# lexical agreement correlate with it rather than adding to it. Widening
+# the window tripled candidate pairs (and therefore LLM calls) while
+# adding one pair of genuine recall.
+#
+# So the window is NOT widened. The signals are kept because they cost
+# nothing measurable, can only add pairs (never drop them -- verified),
+# and record *why* each pair was retrieved into relationships.candidate_reason,
+# which is what makes a missing relationship diagnosable instead of a
+# silent gap. See PERFORMANCE.md.
+HYBRID_SCAN_K = SIMILARITY_TOP_K
+# Above this pool size hybrid scoring is skipped entirely and retrieval
+# falls back to embedding-only top-K.
+HYBRID_MAX_POOL = 4000
 
 # ---------------------------------------------------------------- step 1 --
 
@@ -234,28 +265,55 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
     # comparison (so the second lookup would already see it); deferring all
     # inserts until after the concurrent LLM calls below means that guard
     # has to be explicit instead.
+    # Fact rows are looked up repeatedly during scoring (a fact can appear
+    # in many pairs), so memoize rather than re-hitting SQLite each time.
+    fact_cache: dict[int, dict] = {f["id"]: f for f in new_facts}
+
+    def load_fact(fact_id: int):
+        if fact_id not in fact_cache:
+            fact_cache[fact_id] = db.get_fact(fact_id)
+        return fact_cache[fact_id]
+
     seen_pairs: set[tuple[int, int]] = set()
     jobs = []
+    hybrid_promotions = 0
     for fact, (fid, emb) in zip(new_facts, new_pool):
         candidates = [c for c in full_pool if c[0] != fid]
-        top = top_k_similar(emb, candidates, SIMILARITY_TOP_K)
+
+        # Embedding similarity narrows the field; the other signals are
+        # then applied to a wider window than the embedding threshold
+        # alone would admit, so a pair that embeddings rank poorly can
+        # still be promoted by an entity/lexical/numeric match. Beyond
+        # HYBRID_MAX_POOL the wider scan is skipped and this degrades to
+        # the original embedding-only top-K -- bounded cost, no cliff.
+        scan_k = SIMILARITY_TOP_K if len(candidates) > HYBRID_MAX_POOL else HYBRID_SCAN_K
+        top = top_k_similar(emb, candidates, max(SIMILARITY_TOP_K, scan_k))
+
         for other_id, score in top:
-            if score < SIMILARITY_THRESHOLD:
-                continue
             pair_key = (min(fid, other_id), max(fid, other_id))
             if pair_key in seen_pairs or db.relationship_exists(fid, other_id):
                 continue
-            other = db.get_fact(other_id)
+            other = load_fact(other_id)
             if other is None:
                 continue
+
+            reason = score_pair(fact, other, score)
+            if not reason.selected:
+                continue
+            if "embedding" not in reason.triggers:
+                hybrid_promotions += 1
+
             seen_pairs.add(pair_key)
-            jobs.append((fact, other, score))
+            jobs.append((fact, other, score, reason))
     candidate_retrieval_seconds = time.perf_counter() - t0
 
     summary = {
         "candidates_checked": len(jobs), "stored": 0, "skipped_unrelated": 0, "errors": 0,
         "llm_calls": 0, "cache_hits": 0,
         "metric_mismatches": 0,  # step 1 said "no" -- resolved without ever reaching step 2
+        # Pairs no embedding threshold would have surfaced, promoted by an
+        # entity/lexical/numeric signal instead (see app/candidates.py).
+        "hybrid_promotions": hybrid_promotions,
         "candidate_retrieval_seconds": round(candidate_retrieval_seconds, 3),
         "llm_reasoning_seconds": 0.0,
     }
@@ -263,7 +321,7 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
         return summary
 
     def run_job(job):
-        fact, other, score = job
+        fact, other, score, _reason = job
         try:
             result, cache_hit = classify_pair(
                 fact, doc_name(fact["document_id"]),
@@ -288,7 +346,7 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
     summary["llm_reasoning_seconds"] = round(time.perf_counter() - t0, 3)
 
     for job, result, cache_hit, exc in results:
-        fact, other, score = job
+        fact, other, score, reason = job
 
         if exc is not None:
             db.insert_issue(document_id, fact["page_number"], "relationship_classification_failed",
@@ -314,6 +372,7 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             result.get("reconciliation_context"),
             result.get("confidence"),
             score,
+            reason.describe(),
         )
         summary["stored"] += 1
 

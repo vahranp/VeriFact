@@ -79,6 +79,14 @@ SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.40"))
 # Skip pages with near-empty extracted text (e.g. divider pages, pure images)
 MIN_PAGE_CHARS = int(os.getenv("MIN_PAGE_CHARS", "40"))
 
+# Upload guardrails. Neither is about the pipeline's capability -- it's
+# about not silently committing the machine to hours of local inference.
+# A 100-page unrestricted upload really did get kicked off by accident
+# during development and had to be killed manually; the warning below is
+# advisory (the job still starts) so a deliberate large run isn't blocked.
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "50"))
+LARGE_JOB_PAGE_WARNING = int(os.getenv("LARGE_JOB_PAGE_WARNING", "25"))
+
 # --- Performance tunables added after profiling (see README > Approach >
 # Performance) ---
 

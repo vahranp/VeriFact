@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
 from app import db
+from app.arithmetic import check_arithmetic_consistency
 from app.config import LLM_CONCURRENCY
 from app.embeddings import embed
 from app.fact_extraction import extract_facts_from_chunk
@@ -64,6 +65,8 @@ def _log_stats(document_name: str, stats: dict):
         f"    candidate_retrieval:   {_fmt(stats['timing']['candidate_retrieval'])}",
         f"    relationship_reasoning (LLM): {_fmt(stats['timing']['relationship_reasoning'])}",
         f"    database:              {_fmt(stats['timing']['database'])}",
+        f"  Arithmetic self-validation: {stats.get('arithmetic_identities', 0)} identities confirmed, "
+        f"{stats.get('arithmetic_anomalies', 0)} scale anomalies flagged",
         f"  Total processing time: {_fmt(stats['timing']['total'])}",
     ]
     print("\n".join(lines))
@@ -153,6 +156,23 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
                     new_fact_ids.append(fid)
                     v_idx += 1
 
+        # --- Arithmetic self-validation (deterministic, no LLM call).
+        # Looks for additive identities among this document's own numbers
+        # (a total equalling the sum of its parts, etc.) as independent
+        # evidence the figures were read correctly, and flags near-misses
+        # that only resolve if a value is rescaled by a power of ten --
+        # the signature of a denomination/unit misread. See app/arithmetic.py.
+        arithmetic_report = None
+        with sw.track("arithmetic"):
+            all_new_facts = [f for _, facts in per_chunk_facts for f in facts]
+            arithmetic_report = check_arithmetic_consistency(all_new_facts)
+        with sw.track("database"):
+            for anomaly in arithmetic_report.scale_anomalies:
+                db.insert_issue(
+                    document_id, None, "arithmetic_scale_anomaly",
+                    anomaly.describe(), f"suspect value: {anomaly.suspect_fact.get('value')}",
+                )
+
         rel_summary = {
             "candidates_checked": 0, "stored": 0, "skipped_unrelated": 0, "errors": 0,
             "llm_calls": 0, "cache_hits": 0,
@@ -177,12 +197,15 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             "reasoning_cache_hits": rel_summary["cache_hits"],
             "ollama_calls": extraction_calls + rel_summary["llm_calls"],
             "relationship_errors": rel_summary["errors"],
+            "arithmetic_identities": len(arithmetic_report.identities) if arithmetic_report else 0,
+            "arithmetic_anomalies": len(arithmetic_report.scale_anomalies) if arithmetic_report else 0,
             "timing": {
                 "pdf_extraction": sw.totals.get("pdf_extraction", 0.0),
                 "fact_extraction": sw.totals.get("fact_extraction", 0.0),
                 "embeddings": sw.totals.get("embeddings", 0.0),
                 "candidate_retrieval": sw.totals.get("candidate_retrieval", 0.0),
                 "relationship_reasoning": sw.totals.get("relationship_reasoning", 0.0),
+                "arithmetic": sw.totals.get("arithmetic", 0.0),
                 "database": sw.totals.get("database", 0.0),
                 "total": total_seconds,
             },
