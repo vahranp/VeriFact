@@ -12,7 +12,7 @@ wall-clock time on a local model (see README > Approach > Performance).
 import json
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
 from app import db
@@ -97,16 +97,29 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         # --- Fact extraction: one LLM call per chunk, at most LLM_CONCURRENCY
         # in flight at once. Each call already asks for every fact on that
         # chunk in one structured response (not one call per fact) -- see
-        # SYSTEM_PROMPT in fact_extraction.py. Order is preserved by
-        # ThreadPoolExecutor.map, so downstream page/chunk attribution is
-        # unaffected by which call happens to finish first.
+        # SYSTEM_PROMPT in fact_extraction.py. Submitted via as_completed
+        # (not pool.map) specifically so progress can be reported as each
+        # chunk finishes, not only once the whole batch is done; results are
+        # written back into a pre-sized list by original index so downstream
+        # page/chunk attribution is unaffected by completion order.
         extraction_calls = 0
         extraction_cache_hits = 0
+        total_chunks = len(chunks)
+        results: list = [None] * total_chunks
+        db.set_progress(document_id, "extracting", 0, total_chunks, None)
         with sw.track("fact_extraction"):
             with ThreadPoolExecutor(max_workers=max(1, LLM_CONCURRENCY)) as pool:
-                results = list(pool.map(
-                    lambda c: extract_facts_from_chunk(c, document_name), chunks
-                ))
+                future_to_idx = {
+                    pool.submit(extract_facts_from_chunk, c, document_name): i
+                    for i, c in enumerate(chunks)
+                }
+                done_count = 0
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    results[idx] = future.result()
+                    done_count += 1
+                    db.set_progress(document_id, "extracting", done_count, total_chunks,
+                                     f"page {chunks[idx].page_number}")
 
         all_statements: list[str] = []
         per_chunk_facts: list[tuple] = []  # (chunk, facts) with issues already logged
@@ -127,6 +140,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         # document rather than one call per chunk -- sentence-transformers
         # amortizes fixed per-call overhead better over a bigger batch, and
         # it means this stage's cost no longer scales with chunk count.
+        db.set_progress(document_id, "embedding", 0, 1, None)
         with sw.track("embeddings"):
             vectors = embed(all_statements) if all_statements else []
 
@@ -175,6 +189,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         }
         _log_stats(document_name, stats)
 
+        db.clear_progress(document_id)
         db.update_document(
             document_id, status="done",
             error_message=(
@@ -185,5 +200,6 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             stats_json=json.dumps(stats),
         )
     except Exception as exc:  # noqa: BLE001 - top-level job boundary, must not crash the server
+        db.clear_progress(document_id)
         db.update_document(document_id, status="failed", error_message=f"{exc}\n{traceback.format_exc()[-1500:]}")
         db.insert_issue(document_id, None, "pipeline_crashed", str(exc), traceback.format_exc()[-1500:])

@@ -6,7 +6,7 @@ all -- this is what makes ingesting document N+1 not re-scan documents
 1..N against each other.
 """
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app import db
 from app.cache import hash_fact_pair, hash_text
@@ -186,8 +186,17 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             return job, None, False, exc
 
     t0 = time.perf_counter()
+    total_jobs = len(jobs)
+    results: list = [None] * total_jobs
+    db.set_progress(document_id, "comparing", 0, total_jobs, None)
     with ThreadPoolExecutor(max_workers=max(1, LLM_CONCURRENCY)) as pool:
-        results = list(pool.map(run_job, jobs))
+        future_to_idx = {pool.submit(run_job, j): i for i, j in enumerate(jobs)}
+        done_count = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            results[idx] = future.result()
+            done_count += 1
+            db.set_progress(document_id, "comparing", done_count, total_jobs, None)
     summary["llm_reasoning_seconds"] = round(time.perf_counter() - t0, 3)
 
     for job, result, cache_hit, exc in results:

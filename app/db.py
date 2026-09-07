@@ -127,6 +127,7 @@ def init_db():
         _ensure_column(conn, "documents", "stats_json", "TEXT")
         _ensure_column(conn, "documents", "page_selector", "TEXT")
         _ensure_column(conn, "documents", "reused_from_document_id", "INTEGER")
+        _ensure_column(conn, "documents", "progress_json", "TEXT")
 
 
 # ---------------- documents ----------------
@@ -140,6 +141,22 @@ def insert_document(original_name: str, stored_path: str, content_hash: Optional
             (original_name, stored_path, time.time(), content_hash, page_selector),
         )
         return cur.lastrowid
+
+
+def set_progress(document_id: int, stage: str, current: int, total: int, detail: Optional[str] = None):
+    """Lightweight, frequently-written progress marker for the UI's live
+    progress bar -- separate from stats_json (which is the final, complete
+    summary written once at the end). Called from the main thread only,
+    once per completed chunk/candidate, as futures resolve (see
+    app/pipeline.py and app/relationships.py) -- never from a worker
+    thread, keeping all SQLite writes single-threaded."""
+    update_document(document_id, progress_json=json.dumps({
+        "stage": stage, "current": current, "total": total, "detail": detail,
+    }))
+
+
+def clear_progress(document_id: int):
+    update_document(document_id, progress_json=None)
 
 
 def find_done_document_by_hash(content_hash: str, page_selector: Optional[str]) -> Optional[dict]:

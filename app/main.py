@@ -93,6 +93,12 @@ async def upload_document(
     return {"id": document_id, "status": "pending"}
 
 
+def _pop_progress(d: dict) -> dict:
+    progress_json = d.pop("progress_json", None)
+    d["progress"] = json.loads(progress_json) if progress_json else None
+    return d
+
+
 @app.get("/api/documents")
 def list_documents():
     docs = db.list_documents()
@@ -105,6 +111,7 @@ def list_documents():
         # -- attribute its source document's count so it doesn't look empty.
         source_id = d.get("reused_from_document_id") or d["id"]
         d["fact_count"] = counts.get(source_id, 0)
+        _pop_progress(d)
     return docs
 
 
@@ -123,6 +130,7 @@ def get_document(document_id: int):
         f.pop("embedding_json", None)
     stats_json = d.pop("stats_json", None)
     d["stats"] = json.loads(stats_json) if stats_json else None
+    _pop_progress(d)
     return d
 
 
