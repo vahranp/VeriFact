@@ -16,3 +16,6 @@ server_err.log
 
 shot_*.png
 dom.html
+
+# Audit/benchmark run logs
+*.log
