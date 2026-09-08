@@ -7,12 +7,17 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Path as PathParam, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+from app.api_models import (
+    CoherenceOut, DocumentOut, FactOut, IssueOut, RelationshipOut, StatsOut,
+    UploadAccepted,
+)
 
 from app import db
 from app.cache import hash_file
@@ -30,6 +35,26 @@ db.init_db()
 
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Last line of defence so an unexpected error returns clean JSON
+    rather than a stack trace.
+
+    A traceback in an HTTP response leaks file paths and internal
+    structure, and tells the caller nothing they can act on. The detail
+    stays server-side in the log; the client gets the request path and a
+    statement that it failed.
+    """
+    import traceback
+    print(f"Unhandled error on {request.method} {request.url.path}:")
+    print(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal error handling {request.method} {request.url.path}. "
+                            f"The server logged the cause."},
+    )
 
 
 @app.get("/")
@@ -53,7 +78,10 @@ def _enrich_fact(fact: dict, cache: dict) -> dict:
 
 # ---------------- documents ----------------
 
-@app.post("/api/documents")
+@app.post("/api/documents", response_model=UploadAccepted,
+          summary="Upload a PDF for ingestion",
+          responses={400: {"description": "Not a PDF, corrupt, empty, or a malformed page selector"},
+                     413: {"description": "File exceeds MAX_UPLOAD_MB"}})
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -148,7 +176,8 @@ def _pop_progress(d: dict) -> dict:
     return d
 
 
-@app.get("/api/documents")
+@app.get("/api/documents", response_model=list[DocumentOut],
+         summary="All ingested documents with status and pipeline stats")
 def list_documents():
     docs = db.list_documents()
     facts = db.list_facts()
@@ -169,8 +198,10 @@ def list_documents():
     return docs
 
 
-@app.get("/api/documents/{document_id}")
-def get_document(document_id: int):
+@app.get("/api/documents/{document_id}", response_model=DocumentOut,
+         summary="One document with its facts and extraction issues",
+         responses={404: {"description": "No such document"}})
+def get_document(document_id: int = PathParam(ge=1)):
     d = db.get_document(document_id)
     if not d:
         raise HTTPException(404, "Document not found")
@@ -188,8 +219,10 @@ def get_document(document_id: int):
     return d
 
 
-@app.get("/api/documents/{document_id}/pdf")
-def get_document_pdf(document_id: int):
+@app.get("/api/documents/{document_id}/pdf",
+         summary="The original PDF, for citation links",
+         responses={404: {"description": "No such document"}})
+def get_document_pdf(document_id: int = PathParam(ge=1)):
     d = db.get_document(document_id)
     if not d:
         raise HTTPException(404, "Document not found")
@@ -198,8 +231,12 @@ def get_document_pdf(document_id: int):
 
 # ---------------- facts ----------------
 
-@app.get("/api/facts")
-def list_facts(document_id: Optional[int] = None, q: Optional[str] = None):
+@app.get("/api/facts", response_model=list[FactOut],
+         summary="Extracted facts, each with its evidence and grounding status")
+def list_facts(
+    document_id: Optional[int] = Query(None, ge=1),
+    q: Optional[str] = Query(None, max_length=200, description="Case-insensitive substring match on statement, subject or attribute."),
+):
     facts = db.list_facts(document_id)
     if q:
         ql = q.lower()
@@ -213,8 +250,10 @@ def list_facts(document_id: Optional[int] = None, q: Optional[str] = None):
     return [_enrich_fact(f, cache) for f in facts]
 
 
-@app.get("/api/facts/{fact_id}")
-def get_fact(fact_id: int):
+@app.get("/api/facts/{fact_id}", response_model=FactOut,
+         summary="One fact plus every relationship it participates in",
+         responses={404: {"description": "No such fact"}})
+def get_fact(fact_id: int = PathParam(ge=1)):
     fact = db.get_fact(fact_id)
     if not fact:
         raise HTTPException(404, "Fact not found")
@@ -236,8 +275,13 @@ def get_fact(fact_id: int):
 
 # ---------------- relationships ----------------
 
-@app.get("/api/relationships")
-def list_relationships(relation_type: Optional[str] = None):
+@app.get("/api/relationships", response_model=list[RelationshipOut],
+         summary="Judged relationships between facts, with both sides inlined")
+def list_relationships(
+    relation_type: Optional[Literal["corroborates", "contradicts", "reconciled", "uncertain"]] = Query(
+        None, description="Filter by type. An unrecognised value is rejected with 422 rather than silently returning nothing.",
+    ),
+):
     rels = db.list_relationships(relation_type)
     cache: dict = {}
     out = []
@@ -254,12 +298,13 @@ def list_relationships(relation_type: Optional[str] = None):
 
 # ---------------- issues / stats ----------------
 
-@app.get("/api/issues")
-def list_issues(document_id: Optional[int] = None):
+@app.get("/api/issues", response_model=list[IssueOut],
+         summary="Extraction and reasoning failures, recorded rather than swallowed")
+def list_issues(document_id: Optional[int] = Query(None, ge=1)):
     return db.list_issues(document_id)
 
 
-@app.get("/api/stats")
+@app.get("/api/stats", response_model=StatsOut, summary="Corpus-level counts")
 def stats():
     docs = db.list_documents()
     facts = db.list_facts()
@@ -283,7 +328,8 @@ def stats():
     }
 
 
-@app.get("/api/coherence")
+@app.get("/api/coherence", response_model=CoherenceOut,
+         summary="Logically impossible relationship triangles, and edges implied by transitivity")
 def graph_coherence(limit: int = Query(25, ge=1, le=200)):
     """Logical coherence of the relationship graph.
 
