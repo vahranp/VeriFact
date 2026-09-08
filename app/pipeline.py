@@ -123,13 +123,28 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         # chunk in one structured response (not one call per fact) -- see
         # SYSTEM_PROMPT in fact_extraction.py. Submitted via as_completed
         # (not pool.map) specifically so progress can be reported as each
-        # chunk finishes, not only once the whole batch is done; results are
-        # written back into a pre-sized list by original index so downstream
-        # page/chunk attribution is unaffected by completion order.
+        # chunk finishes, not only once the whole batch is done.
+        #
+        # Facts are embedded and written to the database HERE, per chunk,
+        # as each one finishes -- not batched until every chunk in the
+        # document is done. That used to be a real problem, not just a
+        # cosmetic one: on a 289-chunk document the UI showed "0 facts"
+        # for the entire extraction phase even though early chunks had
+        # already found real ones (confirmed directly against the
+        # extraction cache -- chunk 5 alone had produced 10), and a crash
+        # or restart mid-extraction would have discarded every fact found
+        # so far, contradicting the "never discard real LLM work"
+        # principle this project otherwise holds to everywhere else
+        # (content-hash caching, kept-on-cancel relationship judgments).
+        # Embedding per chunk (a handful of short strings) instead of once
+        # for the whole document loses a little batching efficiency, but
+        # that cost is negligible next to the per-chunk LLM call it's
+        # interleaved with -- seconds, versus low milliseconds.
         extraction_calls = 0
         extraction_cache_hits = 0
         total_chunks = len(chunks)
-        results: list = [None] * total_chunks
+        new_fact_ids: list[int] = []
+        all_new_facts: list[dict] = []  # flat fact dicts, for arithmetic validation below
         extraction_cancelled = False
         db.set_progress(document_id, "extracting", 0, total_chunks, None)
         with sw.track("fact_extraction"):
@@ -141,57 +156,41 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
                 done_count = 0
                 for future in as_completed(future_to_idx):
                     idx = future_to_idx[future]
-                    results[idx] = future.result()
+                    chunk = chunks[idx]
+                    facts, issues, cache_hit = future.result()
                     done_count += 1
                     db.set_progress(document_id, "extracting", done_count, total_chunks,
-                                     f"page {chunks[idx].page_number}")
+                                     f"page {chunk.page_number}")
+
+                    if cache_hit:
+                        extraction_cache_hits += 1
+                    else:
+                        extraction_calls += 1
+
+                    with sw.track("database"):
+                        for issue in issues:
+                            db.insert_issue(document_id, chunk.page_number, issue["issue_type"],
+                                             issue["detail"], issue.get("raw_excerpt", ""))
+
+                    if facts:
+                        with sw.track("embeddings"):
+                            vectors = embed([f["statement"] for f in facts])
+                        with sw.track("database"):
+                            for fact, vector in zip(facts, vectors):
+                                fid = db.insert_fact(document_id, chunk.page_number, fact, vector)
+                                new_fact_ids.append(fid)
+                        all_new_facts.extend(facts)
 
                     if db.is_cancel_requested(document_id):
                         # Drop chunks not yet started; a chunk already
                         # in flight finishes naturally (bounded by
                         # EXTRACTION_TIMEOUT_SECONDS) rather than being
-                        # forcibly killed -- see db.request_cancel.
+                        # forcibly killed -- see db.request_cancel. Every
+                        # chunk that DID finish before this point already
+                        # had its facts saved above, incrementally.
                         pool.shutdown(wait=False, cancel_futures=True)
                         extraction_cancelled = True
                         break
-
-        all_statements: list[str] = []
-        per_chunk_facts: list[tuple] = []  # (chunk, facts) with issues already logged
-        with sw.track("database"):
-            # A chunk dropped by the cancellation above (or never reached
-            # before the stop) leaves its slot as None -- everything that
-            # DID finish is still processed and saved normally.
-            for chunk, result in zip(chunks, results):
-                if result is None:
-                    continue
-                facts, issues, cache_hit = result
-                if cache_hit:
-                    extraction_cache_hits += 1
-                else:
-                    extraction_calls += 1
-                for issue in issues:
-                    db.insert_issue(document_id, chunk.page_number, issue["issue_type"],
-                                     issue["detail"], issue.get("raw_excerpt", ""))
-                if facts:
-                    per_chunk_facts.append((chunk, facts))
-                    all_statements.extend(f["statement"] for f in facts)
-
-        # --- Embeddings: one batched call across every fact in this
-        # document rather than one call per chunk -- sentence-transformers
-        # amortizes fixed per-call overhead better over a bigger batch, and
-        # it means this stage's cost no longer scales with chunk count.
-        db.set_progress(document_id, "embedding", 0, 1, None)
-        with sw.track("embeddings"):
-            vectors = embed(all_statements) if all_statements else []
-
-        new_fact_ids: list[int] = []
-        with sw.track("database"):
-            v_idx = 0
-            for chunk, facts in per_chunk_facts:
-                for fact in facts:
-                    fid = db.insert_fact(document_id, chunk.page_number, fact, vectors[v_idx])
-                    new_fact_ids.append(fid)
-                    v_idx += 1
 
         arithmetic_report = None
         rel_summary = {
@@ -219,7 +218,6 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             # a power of ten -- the signature of a denomination/unit
             # misread. See app/arithmetic.py.
             with sw.track("arithmetic"):
-                all_new_facts = [f for _, facts in per_chunk_facts for f in facts]
                 arithmetic_report = check_arithmetic_consistency(all_new_facts)
             with sw.track("database"):
                 for anomaly in arithmetic_report.scale_anomalies:
@@ -259,7 +257,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             "pages": len({c.page_number for c in chunks}),
             "chunks": len(chunks),
             "facts": len(new_fact_ids),
-            "embeddings": len(vectors),
+            "embeddings": len(new_fact_ids),  # exactly one embedding per fact, inserted 1:1 above
             "candidate_pairs": rel_summary["candidates_checked"],
             "relationships_stored": rel_summary["stored"],
             "extraction_calls": extraction_calls,
