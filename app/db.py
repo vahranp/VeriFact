@@ -132,6 +132,11 @@ def init_db():
         # (see app/candidates.py) -- makes a missed or spurious
         # relationship traceable to the signal responsible.
         _ensure_column(conn, "relationships", "candidate_reason", "TEXT")
+        # Grounding has two levels: the quote being verbatim in the source,
+        # and the quote actually supporting the extracted value. See
+        # app/evidence.py for why the second is a separate question.
+        _ensure_column(conn, "facts", "evidence_status", "TEXT")
+        _ensure_column(conn, "facts", "evidence_detail", "TEXT")
 
 
 # ---------------- documents ----------------
@@ -214,15 +219,18 @@ def insert_fact(document_id: int, page_number: int, fact: dict, embedding: list[
         cur = conn.execute(
             """INSERT INTO facts
                (document_id, page_number, subject, attribute, value, value_numeric, unit,
-                time_period, scope, statement, quote, quote_grounded, confidence, embedding_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                time_period, scope, statement, quote, quote_grounded, confidence,
+                evidence_status, evidence_detail, embedding_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 document_id, page_number,
                 fact.get("subject"), fact.get("attribute"), fact.get("value"),
                 fact.get("value_numeric"), fact.get("unit"), fact.get("time_period"),
                 fact.get("scope"), fact.get("statement"), fact.get("quote"),
                 1 if fact.get("quote_grounded", True) else 0,
-                fact.get("confidence"), json.dumps(embedding), time.time(),
+                fact.get("confidence"),
+                fact.get("evidence_status"), fact.get("evidence_detail"),
+                json.dumps(embedding), time.time(),
             ),
         )
         return cur.lastrowid

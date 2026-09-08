@@ -273,6 +273,10 @@ def stats():
         "documents_done": len([d for d in docs if d["status"] == "done"]),
         "facts": len(facts),
         "ungrounded_facts": len([f for f in facts if not f["quote_grounded"]]),
+        # The stronger of the two grounding questions: not just "is this
+        # quote real" but "does it support the value". See app/evidence.py.
+        "fact_validated": len([f for f in facts if f.get("evidence_status") == "fact_validated"]),
+        "quote_grounded_only": len([f for f in facts if f.get("evidence_status") == "quote_grounded"]),
         "relationships": len(rels),
         "relationships_by_type": by_type,
         "issues": len(issues),

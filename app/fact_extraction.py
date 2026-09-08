@@ -9,6 +9,7 @@ import re
 
 from app import db
 from app.cache import hash_text
+from app.evidence import check_evidence
 from app.schemas import validate_facts
 from app.config import EXTRACTION_MODEL, EXTRACTION_TIMEOUT_SECONDS
 from app.llm_client import chat_json, LLMError, LLMParseError
@@ -180,6 +181,24 @@ def _reground_quote(fact_statement: str, page_text: str) -> str | None:
     return candidate if _find_quote_offset(page_text, candidate) != -1 else None
 
 
+
+def _apply_evidence(facts: list[dict]) -> list[dict]:
+    """Stamps evidence_status/evidence_detail onto facts.
+
+    Used on the cache-read path so facts extracted before this check
+    existed still carry a verdict, and so a change to the evidence rules
+    takes effect immediately instead of waiting for a cache miss.
+    """
+    out = []
+    for fact in facts:
+        fact = dict(fact)
+        check = check_evidence(fact, bool(fact.get("quote_grounded", True)))
+        fact["evidence_status"] = check.status
+        fact["evidence_detail"] = check.describe()
+        out.append(fact)
+    return out
+
+
 def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict], bool]:
     """Returns (facts, issues, cache_hit). `facts` have a 'quote_grounded'
     bool added. `issues` are dicts ready to hand to
@@ -197,7 +216,11 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
     chunk_hash = hash_text(EXTRACTION_MODEL, SYSTEM_PROMPT, chunk.text, chunk.page_context)
     cached = db.get_cached_extraction(chunk_hash)
     if cached is not None:
-        return cached["facts"], cached["issues"], True
+        # The evidence check is deterministic and costs nothing, so it is
+        # applied to cached facts too rather than bumping the cache key.
+        # Invalidating here would throw away real LLM work to recompute a
+        # verdict that string comparison can produce in microseconds.
+        return _apply_evidence(cached["facts"]), cached["issues"], True
 
     issues: list[dict] = []
     context_block = ""
@@ -286,7 +309,7 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
         if value_numeric is None:
             value_numeric = _numeric_fallback(item.get("value"))
 
-        facts.append({
+        fact = {
             "subject": item.get("subject"),
             "attribute": item.get("attribute"),
             "value": item.get("value"),
@@ -298,7 +321,25 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
             "quote": quote,
             "quote_grounded": grounded,
             "confidence": item.get("confidence"),
-        })
+        }
+
+        # Second, stronger grounding question: the quote is real, but does
+        # it actually *support* this value? Measured at 10.5% failure on
+        # real extractions -- almost all of them a table cell whose row
+        # label became the quote. See app/evidence.py.
+        evidence = check_evidence(fact, grounded)
+        fact["evidence_status"] = evidence.status
+        fact["evidence_detail"] = evidence.describe()
+        if grounded and not evidence.validated:
+            issues.append({
+                "issue_type": "value_not_evidenced",
+                "detail": (
+                    f"Fact '{str(item.get('statement', ''))[:120]}' has a verbatim quote, but "
+                    f"{evidence.describe()}."
+                ),
+                "raw_excerpt": quote[:300],
+            })
+        facts.append(fact)
 
     # Cache the outcome even if it contains issues (e.g. an ungrounded
     # quote) -- the cache stores "what the model actually said for this

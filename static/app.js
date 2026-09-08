@@ -634,15 +634,31 @@ function factCard(f) {
   return `<div class="fcard rise">
     <div class="fcard-h">
       <a class="pill" href="${pdfLink(f.document_id, f.page_number)}" target="_blank">${I.file}${esc(docName(f.document_name))} <span class="small">(${esc(docScope(docById(f.document_id)))})</span> · p.${f.page_number}</a>
-      ${f.quote_grounded ? `<span class="badge b-done"><span style="display:flex">${I.shield}</span>quote verified</span>`
-                         : `<span class="badge b-processing"><span style="display:flex">${I.alert}</span>quote unverified</span>`}
+      ${evidenceBadge(f)}
     </div>
     <div class="fstate">${esc(f.statement)}</div>
     <div class="triple"><span class="s">${esc(f.subject || "?")}</span><span class="ar">${I.arrow}</span>
       <span class="a">${esc(f.attribute || "?")}</span><span class="ar">=</span><span class="v">${esc(f.value || "?")}</span></div>
     ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
-    <div class="quote ${f.quote_grounded ? "" : "bad"}">${f.quote_grounded ? "" : `<span class="wtag">Not found verbatim — </span>`}"${esc(f.quote)}"</div>
+    <div class="quote ${f.evidence_status === "fact_validated" ? "" : "bad"}">${f.quote_grounded ? "" : `<span class="wtag">Not found verbatim — </span>`}"${esc(f.quote)}"</div>
+    ${f.evidence_status && f.evidence_status !== "fact_validated" && f.evidence_detail
+        ? `<div class="edetail">${esc(f.evidence_detail)}</div>` : ""}
   </div>`;
+}
+
+// Grounding has two independent levels: is the quote real, and does it
+// actually support the value? A fact can pass the first and fail the
+// second -- 36% of real extractions did -- so the badge distinguishes
+// them rather than showing a green tick for "the text exists".
+function evidenceBadge(f) {
+  const s = f.evidence_status;
+  if (s === "fact_validated" || (!s && f.quote_grounded)) {
+    return `<span class="badge b-done"><span style="display:flex">${I.shield}</span>evidence verified</span>`;
+  }
+  if (s === "quote_grounded") {
+    return `<span class="badge b-reconciled"><span style="display:flex">${I.alert}</span>quote real, value unverified</span>`;
+  }
+  return `<span class="badge b-processing"><span style="display:flex">${I.alert}</span>quote unverified</span>`;
 }
 
 function renderFacts() {
