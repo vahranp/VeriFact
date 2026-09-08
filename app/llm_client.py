@@ -41,15 +41,37 @@ def _extract_json_block(text: str) -> str:
         text = fenced.group(1)
 
     text = text.strip()
-    for open_ch, close_ch in (("[", "]"), ("{", "}")):
-        start = text.find(open_ch)
-        if start == -1:
-            continue
+
+    # Take whichever delimiter opens FIRST, not arrays by preference.
+    # Preferring "[" unconditionally meant a malformed *object* whose
+    # strings happened to contain a bracket got carved up into that inner
+    # fragment instead: {"same_metric": true, "reason": "values [1] and [2]
+    # differ",} yielded "[1]", which parses cleanly to a list, so the caller
+    # then died on result.get(...) with an AttributeError -- a crash instead
+    # of the LLMParseError callers are written to handle.
+    candidates = [(text.find(ch), ch, close) for ch, close in (("[", "]"), ("{", "}"))]
+    candidates = sorted((pos, ch, close) for pos, ch, close in candidates if pos != -1)
+
+    for start, open_ch, close_ch in candidates:
         depth = 0
+        in_string = False
+        escaped = False
         for i in range(start, len(text)):
-            if text[i] == open_ch:
+            char = text[i]
+            # Brackets inside string literals are data, not structure.
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == open_ch:
                 depth += 1
-            elif text[i] == close_ch:
+            elif char == close_ch:
                 depth -= 1
                 if depth == 0:
                     return text[start:i + 1]
