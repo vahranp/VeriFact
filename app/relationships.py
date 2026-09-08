@@ -30,6 +30,7 @@ from app.config import (
 from app.candidates import score_pair
 from app.embeddings import top_k_similar
 from app.llm_client import chat_json, LLMError, LLMParseError
+from app.context import compare_periods, compare_scopes, format_context_for_prompt
 from app.normalize import compare_values, format_comparison_for_prompt
 from app.schemas import MetricMatch, RelationJudgment
 
@@ -121,11 +122,20 @@ metric or attribute -- your job now is only to decide HOW they relate: do the st
 agree, disagree without explanation, or disagree for a reconcilable reason (different time \
 period, scope, or unit)?
 
-A deterministic numeric comparison is provided below whenever both facts had a parseable value \
-and unit -- trust it over your own arithmetic; do not recompute or second-guess the unit \
-conversion it already did. If it reports the comparison was not possible (e.g. a \
-qualitative/status fact, or units that don't reduce to a common base), judge agreement from the \
-statements and quotes directly instead.
+Three determinations are supplied below, all computed in code rather than by you: a normalized \
+numeric comparison, a reporting-period comparison, and a scope comparison. Trust all three over \
+your own reading -- do not recompute the unit conversion, and do not re-derive whether two period \
+labels mean the same thing ("FY24" and "FY2023-24" are one period written two ways, and the \
+comparison below already accounts for that). Where a determination reports UNKNOWN or says it was \
+not possible, judge that aspect from the statements and quotes instead, and prefer lower confidence.
+
+Treat the period and scope determinations as gating your choice:
+- period or scope DIFFERENT -> a value difference is expected. That is "reconciled", not \
+"contradicts", and you must name the specific difference as the reconciling context.
+- period SAME, and scope SAME or UNKNOWN -> context does not explain a value difference, so a \
+material unexplained difference is a genuine "contradicts".
+- period OVERLAPPING (a quarter inside a year, or a fiscal year against a calendar year) -> the \
+figures are not expected to match; that is "reconciled", not a contradiction.
 
 Decide exactly one relation_type:
 - "corroborates": the values agree (directly, or per the normalized comparison below) for the \
@@ -281,7 +291,17 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
         fact_a.get("value_numeric"), fact_a.get("unit"),
         fact_b.get("value_numeric"), fact_b.get("unit"),
     )
-    comparison_line = format_comparison_for_prompt(comparison)
+    # Period and scope are determined in code for the same reason values
+    # are: "FY24" and "FY2023-24" are the same period written two ways, and
+    # a model comparing those strings has no reason to know it. See
+    # app/context.py.
+    period = compare_periods(fact_a.get("time_period"), fact_b.get("time_period"))
+    scope = compare_scopes(fact_a.get("scope"), fact_b.get("scope"))
+
+    comparison_line = "\n".join([
+        format_comparison_for_prompt(comparison),
+        format_context_for_prompt(period, scope),
+    ])
     judge_result, judge_cached = classify_relation(fact_a, doc_a_name, fact_b, doc_b_name, comparison_line)
 
     result = dict(judge_result)
@@ -290,6 +310,8 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
         "llm_calls": (0 if metric_cached else 1) + (0 if judge_cached else 1),
         "same_metric": True,
         "comparison": comparison_line,
+        "period": period.relation,
+        "scope": scope.relation,
         "swapped": swapped,
     }
     return result, (metric_cached and judge_cached)
