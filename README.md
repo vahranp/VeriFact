@@ -199,7 +199,9 @@ page. The API supports the same via `POST /api/documents?pages=1,3,7-10`.
 `[ADD LINK HERE AFTER RECORDING]`
 
 Shows: uploading a PDF, the four required cases (corroboration / contradiction / reconciled
-contradiction / extraction failure) with their source evidence, and the Extraction Issues view.
+contradiction / extraction failure) with their source evidence, the LLM-vs-system disagreement
+feature, and the Extraction Issues view. Full scene-by-scene shot list and narration in
+[VIDEO_SCRIPT.pdf](VIDEO_SCRIPT.pdf).
 
 ## Approach
 
