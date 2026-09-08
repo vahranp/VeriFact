@@ -136,16 +136,40 @@ class TestScopeComparison:
 
 
 class TestPromptFormatting:
+    """Context explains a *difference*. When the values agree there is no
+    difference to explain, and saying anything about explaining one is
+    worse than saying nothing -- that caused a real regression, where a
+    clean corroboration (values agreeing to 0.006%) came back classified
+    as a contradiction because the block told the model a difference
+    "would not be explained by context"."""
+
+    def test_agreeing_values_are_not_told_a_gap_is_unexplained(self):
+        block = format_context_for_prompt(
+            compare_periods("FY24", "FY2023-24"), compare_scopes(None, None),
+            values_agree=True)
+        assert "no discrepancy for context to explain" in block
+        assert "not explained by context" not in block
+
     def test_a_context_difference_tells_the_model_a_gap_is_expected(self):
         block = format_context_for_prompt(
-            compare_periods("FY24", "FY23"), compare_scopes(None, None))
+            compare_periods("FY24", "FY23"), compare_scopes(None, None),
+            values_agree=False)
         assert "EXPECTED" in block
         assert "not by itself evidence of a contradiction" in block
 
     def test_matching_context_tells_the_model_a_gap_is_unexplained(self):
         block = format_context_for_prompt(
-            compare_periods("FY24", "FY2023-24"), compare_scopes("consolidated", "consolidated"))
-        assert "would not be explained by context" in block
+            compare_periods("FY24", "FY2023-24"), compare_scopes("consolidated", "consolidated"),
+            values_agree=False)
+        assert "not explained by context" in block
+
+    def test_no_numeric_comparison_means_no_guidance_is_asserted(self):
+        """Without a usable comparison the model must judge agreement from
+        the statements, so promising it anything about differences would
+        assert more than is known."""
+        block = format_context_for_prompt(
+            compare_periods("FY24", "FY24"), compare_scopes(None, None), values_agree=None)
+        assert "EXPECTED" not in block and "explain" not in block
 
     def test_both_determinations_always_appear(self):
         block = format_context_for_prompt(

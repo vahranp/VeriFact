@@ -289,20 +289,45 @@ def compare_scopes(a: Optional[str], b: Optional[str]) -> Comparison:
     return Comparison(DIFFERENT, f"different scopes: '{a}' vs '{b}'")
 
 
-def format_context_for_prompt(period: Comparison, scope: Comparison) -> str:
+def format_context_for_prompt(period: Comparison, scope: Comparison,
+                               values_agree: Optional[bool] = None) -> str:
     """One block, ready to drop into the reasoning prompt, so the model is
-    given these determinations rather than asked to make them."""
+    given these determinations rather than asked to make them.
+
+    `values_agree` is required for the concluding guidance to be correct,
+    and leaving it out caused a real regression: the block previously said
+    "a material difference in values would not be explained by context"
+    whenever the periods matched, even when the numeric comparison
+    immediately above it reported the values agreeing to 0.006%. The model
+    read that as licence to call a clean corroboration a contradiction.
+
+    Context only ever explains a difference. When there is no difference,
+    saying anything about explaining one is worse than saying nothing.
+    """
     lines = [f"Reporting period: {period.relation.upper()} -- {period.detail}.",
              f"Scope: {scope.relation.upper()} -- {scope.detail}."]
 
+    if values_agree is True:
+        lines.append(
+            "The values AGREE, so there is no discrepancy for context to explain. Period and "
+            "scope are shown only to confirm the two facts are comparable."
+        )
+        return "\n".join(lines)
+
+    if values_agree is None:
+        # No usable numeric comparison; the model must judge agreement from
+        # the statements, so promising it anything about differences would
+        # be asserting more than is known.
+        return "\n".join(lines)
+
     if period.relation == DIFFERENT or scope.relation == DIFFERENT:
         lines.append(
-            "Because the facts differ in period or scope, a difference in their values is "
+            "The values differ AND the facts differ in period or scope, so the difference is "
             "EXPECTED and is not by itself evidence of a contradiction."
         )
     elif period.relation == SAME and scope.relation in (SAME, UNKNOWN):
         lines.append(
-            "The facts cover the same period and no scope difference separates them, so a "
-            "material difference in values would not be explained by context."
+            "The values differ, the facts cover the same period, and no scope difference "
+            "separates them -- so this difference is not explained by context."
         )
     return "\n".join(lines)

@@ -317,9 +317,17 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
     period = compare_periods(fact_a.get("time_period"), fact_b.get("time_period"))
     scope = compare_scopes(fact_a.get("scope"), fact_b.get("scope"))
 
+    # The context block needs to know whether the values actually agreed:
+    # context explains a *difference*, so its guidance is only meaningful
+    # when there is one. See format_context_for_prompt.
+    values_agree = (
+        comparison.agree
+        if comparison.comparable and not comparison.magnitude_suspect
+        else None
+    )
     comparison_line = "\n".join([
         format_comparison_for_prompt(comparison),
-        format_context_for_prompt(period, scope),
+        format_context_for_prompt(period, scope, values_agree),
     ])
     judge_result, judge_cached = classify_relation(fact_a, doc_a_name, fact_b, doc_b_name, comparison_line)
 
