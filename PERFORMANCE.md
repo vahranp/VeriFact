@@ -520,3 +520,31 @@ fact is correctly reported as quote-grounded but not validated rather than passi
 **Corpus-wide after both changes:** 49.3% fact_validated, 33.0% quote-grounded only, 17.7%
 ungrounded across 373 facts — up from 44.3% validated as more pages are re-ingested with
 table reconstruction. The middle band is the one that used to be invisible.
+
+### A second table page, and a limitation table reconstruction introduces
+
+Page 68 (the consolidated income statement) re-ingested with layout reconstruction produced **24
+facts, all 24 `fact_validated` (100%)**, every one carrying a correct `INR million` unit. On the
+previous extraction of this page, several equity figures came back with a bare `INR` unit — the
+denomination stated once in the page header and lost during flattening.
+
+But the same run exposes a limitation the reconstruction *causes*. Several facts came back with
+`attribute = "value"`:
+
+```
+value = 1.79      INR million   [fact_validated]
+value = 40.05     INR million   [fact_validated]
+```
+
+These are rows deep in the statement whose reconstructed line carries the numbers but whose label
+sits in a column the row-clustering placed elsewhere. The evidence check passes — the number *is*
+in the quoted row — so this is not an evidence failure. It is a naming failure: the fact is
+correctly grounded and uselessly labelled.
+
+That matters because a fact with attribute "value" will never match anything in step 1, so it
+becomes an orphan in the graph. The honest summary is that reconstruction raised evidence quality
+sharply and left a new, narrower problem: rows are recovered, but a cell's *header* meaning is
+not, so the model still has to infer the label and sometimes declines to.
+
+Fixing it properly means propagating header rows into each data row — the natural next step, and
+the reason "header semantics" is listed under remaining limitations rather than claimed as solved.

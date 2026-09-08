@@ -96,6 +96,15 @@ measure with no narrowing qualifier. Examples: "cross border revenue" -> slice i
 "revenue in the North region" -> slice is "North region"; "total revenue" or "revenue from \
 operations" -> slice is "whole".
 
+CRITICAL -- reporting CONTEXT is not a slice. The reporting period (FY24, Q1, "year ended March \
+31") and the reporting basis or scope (consolidated vs standalone, group vs company, gross vs net, \
+actual vs forecast, continuing vs discontinued) are NOT slices and must NOT make you answer no. \
+They describe how the same measure was reported, not which part of it was measured, and they are \
+compared separately and precisely in a later step you are not performing here. "Standalone revenue \
+from operations" and "consolidated revenue from operations" both have slice "whole" and ARE the \
+same metric -- the later step decides whether their scope difference explains a gap in their \
+values. Answering no here would discard exactly the comparisons this system exists to make.
+
 STAGE 2 -- the slices must match before anything else is considered. If the two slices are \
 different parts of one broad measure ("cross border" vs "PTL freight"), answer NO. If one is a \
 slice and the other is "whole" ("cross border revenue" vs "total revenue"), answer NO -- a part \
