@@ -30,12 +30,17 @@ class UploadAccepted(_Permissive):
 class DocumentOut(_Permissive):
     id: int
     original_name: str
-    status: Literal["pending", "processing", "done", "failed"]
+    status: Literal["pending", "processing", "done", "failed", "cancelled"]
     num_pages: Optional[int] = None
     error_message: Optional[str] = None
     page_selector: Optional[str] = None
     progress: Optional[dict] = None
     stats: Optional[dict] = None
+    cancel_requested: Optional[bool] = Field(
+        default=None,
+        description="True once a stop has been requested but the pipeline hasn't yet noticed -- "
+                    "cancellation is cooperative, checked between chunks/candidate pairs.",
+    )
 
 
 class FactOut(_Permissive):

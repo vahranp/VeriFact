@@ -238,6 +238,35 @@ def get_document_pdf(document_id: int = PathParam(ge=1)):
     return FileResponse(d["stored_path"], media_type="application/pdf", filename=d["original_name"])
 
 
+@app.post("/api/documents/{document_id}/cancel", response_model=DocumentOut,
+          summary="Stop a pending or in-progress document",
+          responses={404: {"description": "No such document"},
+                     409: {"description": "Document is not pending or processing -- nothing to cancel"}})
+def cancel_document(document_id: int = PathParam(ge=1)):
+    """Requests that a running or queued document stop.
+
+    This only sets a flag -- app/pipeline.py checks it cooperatively
+    between chunks and candidate pairs, so the response reflects the
+    request being accepted, not the job having already stopped. The
+    document's status stays 'processing' (with cancel_requested now true)
+    until the pipeline notices and flips it to 'cancelled', which normally
+    happens within one chunk or one candidate-pair judgment.
+    """
+    d = db.get_document(document_id)
+    if not d:
+        raise HTTPException(404, "Document not found")
+    if d["status"] not in ("pending", "processing"):
+        raise HTTPException(409, f"Document is '{d['status']}' -- nothing to cancel.")
+
+    db.request_cancel(document_id)
+
+    updated = db.get_document(document_id)
+    stats_json = updated.pop("stats_json", None)
+    updated["stats"] = json.loads(stats_json) if stats_json else None
+    _pop_progress(updated)
+    return updated
+
+
 # ---------------- facts ----------------
 
 @app.get("/api/facts", response_model=list[FactOut],

@@ -76,15 +76,32 @@ def _log_stats(document_name: str, stats: dict):
     print("\n".join(lines))
 
 
+def _mark_cancelled(document_id: int, message: str):
+    db.clear_progress(document_id)
+    db.update_document(document_id, status="cancelled", error_message=message)
+
+
 def process_document(document_id: int, pdf_path: str, max_pages: int | None = None,
                       pages: str | None = None):
     """max_pages: process only pages 1..N (a prefix cap).
     pages: process only this explicit selector, e.g. "1,3,7-10" -- lets a
     large PDF be ingested a targeted slice at a time instead of end to end.
-    If both are omitted, the whole document is processed."""
+    If both are omitted, the whole document is processed.
+
+    A stop request (db.request_cancel) is checked cooperatively at chunk
+    and candidate-pair boundaries in the extraction and comparison stages
+    below, not inside a single LLM call -- see request_cancel for why.
+    Work completed before a stop is kept: extracted facts are still saved,
+    and relationship judgments already made are still stored, exactly as
+    if the run had finished normally. Only the remaining, not-yet-started
+    work and the stages after the interrupted one are skipped."""
     sw = Stopwatch()
     t_total0 = time.perf_counter()
     try:
+        if db.is_cancel_requested(document_id):
+            _mark_cancelled(document_id, "Stopped by user before processing began.")
+            return
+
         db.update_document(document_id, status="processing")
 
         with sw.track("pdf_extraction"):
@@ -113,6 +130,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         extraction_cache_hits = 0
         total_chunks = len(chunks)
         results: list = [None] * total_chunks
+        extraction_cancelled = False
         db.set_progress(document_id, "extracting", 0, total_chunks, None)
         with sw.track("fact_extraction"):
             with ThreadPoolExecutor(max_workers=max(1, LLM_CONCURRENCY)) as pool:
@@ -128,10 +146,25 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
                     db.set_progress(document_id, "extracting", done_count, total_chunks,
                                      f"page {chunks[idx].page_number}")
 
+                    if db.is_cancel_requested(document_id):
+                        # Drop chunks not yet started; a chunk already
+                        # in flight finishes naturally (bounded by
+                        # EXTRACTION_TIMEOUT_SECONDS) rather than being
+                        # forcibly killed -- see db.request_cancel.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        extraction_cancelled = True
+                        break
+
         all_statements: list[str] = []
         per_chunk_facts: list[tuple] = []  # (chunk, facts) with issues already logged
         with sw.track("database"):
-            for chunk, (facts, issues, cache_hit) in zip(chunks, results):
+            # A chunk dropped by the cancellation above (or never reached
+            # before the stop) leaves its slot as None -- everything that
+            # DID finish is still processed and saved normally.
+            for chunk, result in zip(chunks, results):
+                if result is None:
+                    continue
+                facts, issues, cache_hit = result
                 if cache_hit:
                     extraction_cache_hits += 1
                 else:
@@ -160,51 +193,67 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
                     new_fact_ids.append(fid)
                     v_idx += 1
 
-        # --- Arithmetic self-validation (deterministic, no LLM call).
-        # Looks for additive identities among this document's own numbers
-        # (a total equalling the sum of its parts, etc.) as independent
-        # evidence the figures were read correctly, and flags near-misses
-        # that only resolve if a value is rescaled by a power of ten --
-        # the signature of a denomination/unit misread. See app/arithmetic.py.
         arithmetic_report = None
-        with sw.track("arithmetic"):
-            all_new_facts = [f for _, facts in per_chunk_facts for f in facts]
-            arithmetic_report = check_arithmetic_consistency(all_new_facts)
-        with sw.track("database"):
-            for anomaly in arithmetic_report.scale_anomalies:
-                db.insert_issue(
-                    document_id, None, "arithmetic_scale_anomaly",
-                    anomaly.describe(), f"suspect value: {anomaly.suspect_fact.get('value')}",
-                )
-
         rel_summary = {
             "candidates_checked": 0, "stored": 0, "skipped_unrelated": 0, "errors": 0,
-            "llm_calls": 0, "cache_hits": 0,
+            "llm_calls": 0, "cache_hits": 0, "cancelled": False,
             "candidate_retrieval_seconds": 0.0, "llm_reasoning_seconds": 0.0,
         }
-        if new_fact_ids:
-            rel_summary = build_relationships_for_document(document_id, new_fact_ids)
-            sw.totals["candidate_retrieval"] = sw.totals.get("candidate_retrieval", 0.0) + rel_summary["candidate_retrieval_seconds"]
-            sw.totals["relationship_reasoning"] = sw.totals.get("relationship_reasoning", 0.0) + rel_summary["llm_reasoning_seconds"]
-
-        # --- Graph coherence (deterministic, no LLM call). Pairwise
-        # judgments are made in isolation, so the graph they form can be
-        # internally impossible: A=B and B=C while A!=C. Those triangles
-        # prove at least one judgment is wrong without any ground truth,
-        # and the same transitivity fills in edges retrieval never
-        # shortlisted. See app/coherence.py.
         coherence = None
-        with sw.track("coherence"):
-            all_rels = db.list_relationships()
-            facts_by_id = {f["id"]: f for f in db.list_facts()}
-            coherence = check_coherence(all_rels, facts_by_id=facts_by_id)
-        with sw.track("database"):
-            for violation in coherence.violations[:50]:
-                db.insert_issue(
-                    document_id, None, "graph_incoherence",
-                    violation.describe(), violation.reason,
-                )
+        comparison_cancelled = False
 
+        if extraction_cancelled:
+            # Stopped during extraction: the facts that did finish are
+            # already saved above. Everything past this point -- arithmetic
+            # validation, relationship comparison, coherence -- is new work
+            # this run hasn't started yet, so none of it runs. Re-uploading
+            # resumes cheaply: every chunk that finished is still in the
+            # extraction cache.
+            pass
+        else:
+            # --- Arithmetic self-validation (deterministic, no LLM call).
+            # Looks for additive identities among this document's own
+            # numbers (a total equalling the sum of its parts, etc.) as
+            # independent evidence the figures were read correctly, and
+            # flags near-misses that only resolve if a value is rescaled by
+            # a power of ten -- the signature of a denomination/unit
+            # misread. See app/arithmetic.py.
+            with sw.track("arithmetic"):
+                all_new_facts = [f for _, facts in per_chunk_facts for f in facts]
+                arithmetic_report = check_arithmetic_consistency(all_new_facts)
+            with sw.track("database"):
+                for anomaly in arithmetic_report.scale_anomalies:
+                    db.insert_issue(
+                        document_id, None, "arithmetic_scale_anomaly",
+                        anomaly.describe(), f"suspect value: {anomaly.suspect_fact.get('value')}",
+                    )
+
+            if new_fact_ids:
+                rel_summary = build_relationships_for_document(document_id, new_fact_ids)
+                sw.totals["candidate_retrieval"] = sw.totals.get("candidate_retrieval", 0.0) + rel_summary["candidate_retrieval_seconds"]
+                sw.totals["relationship_reasoning"] = sw.totals.get("relationship_reasoning", 0.0) + rel_summary["llm_reasoning_seconds"]
+                comparison_cancelled = rel_summary.get("cancelled", False)
+
+            if not comparison_cancelled:
+                # --- Graph coherence (deterministic, no LLM call). Pairwise
+                # judgments are made in isolation, so the graph they form
+                # can be internally impossible: A=B and B=C while A!=C.
+                # Those triangles prove at least one judgment is wrong
+                # without any ground truth, and the same transitivity
+                # fills in edges retrieval never shortlisted. See
+                # app/coherence.py.
+                with sw.track("coherence"):
+                    all_rels = db.list_relationships()
+                    facts_by_id = {f["id"]: f for f in db.list_facts()}
+                    coherence = check_coherence(all_rels, facts_by_id=facts_by_id)
+                with sw.track("database"):
+                    for violation in coherence.violations[:50]:
+                        db.insert_issue(
+                            document_id, None, "graph_incoherence",
+                            violation.describe(), violation.reason,
+                        )
+
+        cancelled = extraction_cancelled or comparison_cancelled
         total_seconds = time.perf_counter() - t_total0
         stats = {
             "pages": len({c.page_number for c in chunks}),
@@ -239,15 +288,29 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         _log_stats(document_name, stats)
 
         db.clear_progress(document_id)
-        db.update_document(
-            document_id, status="done",
-            error_message=(
-                f"facts={len(new_fact_ids)} "
-                f"relationships_checked={rel_summary['candidates_checked']} "
-                f"relationships_stored={rel_summary['stored']}"
-            ),
-            stats_json=json.dumps(stats),
-        )
+        if cancelled:
+            stage = "extraction" if extraction_cancelled else "relationship comparison"
+            db.update_document(
+                document_id, status="cancelled",
+                error_message=(
+                    f"Stopped by user during {stage}. "
+                    f"facts={len(new_fact_ids)} "
+                    f"relationships_checked={rel_summary['candidates_checked']} "
+                    f"relationships_stored={rel_summary['stored']}. "
+                    f"Already-processed chunks remain cached -- re-upload to continue from here."
+                ),
+                stats_json=json.dumps(stats),
+            )
+        else:
+            db.update_document(
+                document_id, status="done",
+                error_message=(
+                    f"facts={len(new_fact_ids)} "
+                    f"relationships_checked={rel_summary['candidates_checked']} "
+                    f"relationships_stored={rel_summary['stored']}"
+                ),
+                stats_json=json.dumps(stats),
+            )
     except Exception as exc:  # noqa: BLE001 - top-level job boundary, must not crash the server
         db.clear_progress(document_id)
         db.update_document(document_id, status="failed", error_message=f"{exc}\n{traceback.format_exc()[-1500:]}")

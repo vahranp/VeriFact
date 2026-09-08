@@ -250,6 +250,12 @@ button { cursor: pointer; border-radius: var(--r1); border: 1px solid transparen
 .btn-icon { background: var(--surface); border-color: var(--border-2); color: var(--ink-2); width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; box-shadow: var(--sh1); }
 .btn-icon:hover { color: var(--brand); border-color: var(--brand-border); }
 .btn-icon svg { width: 14px; height: 14px; }
+.btn-danger-outline { background: var(--surface); border-color: var(--neg-border); color: var(--neg);
+  padding: 9px 16px; font-weight: 500; display: inline-flex; align-items: center; gap: 8px; box-shadow: var(--sh1); }
+.btn-danger-outline:hover:not(:disabled) { background: var(--neg-soft); }
+.btn-danger-outline:disabled { opacity: .6; cursor: not-allowed; }
+.btn-danger-outline svg { width: 12px; height: 12px; }
+.btn-icon.stop-icon:hover { color: var(--neg); border-color: var(--neg-border); }
 .small { font-size: 12px; color: var(--ink-3); }
 
 /* ============ badges ============ */
@@ -404,6 +410,11 @@ h3.sec { font-size: 13px; font-weight: 650; letter-spacing: .02em; text-transfor
 @media (prefers-color-scheme: dark) {
   .badge.b-uncertain { background: rgba(71,85,105,.25); color: #cbd5e1; border-color: #475569; }
 }
+
+/* A user-requested stop, not a failure -- kept visually distinct from
+   b-failed (red) so the documents list doesn't read "something broke"
+   when the honest story is "someone chose to stop it". */
+.badge.b-cancelled { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
 
 /* Value / period / scope shown inline on each side of a relationship, so
    the comparison being made is visible without opening the Facts tab. */

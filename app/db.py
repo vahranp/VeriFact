@@ -140,6 +140,10 @@ def init_db():
         # Which extraction behaviour produced this document -- reuse of a
         # byte-identical upload is only valid while it still matches.
         _ensure_column(conn, "documents", "pipeline_fingerprint", "TEXT")
+        # User-requested stop. Cooperative, not preemptive -- see
+        # request_cancel below for why, and app/pipeline.py /
+        # app/relationships.py for where it's actually checked.
+        _ensure_column(conn, "documents", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
 
 
 # A job is declared orphaned by STALENESS, not by process identity.
@@ -284,6 +288,36 @@ def update_document(document_id: int, **fields: Any):
     cols = ", ".join(f"{k} = ?" for k in fields)
     with get_conn() as conn:
         conn.execute(f"UPDATE documents SET {cols} WHERE id = ?", (*fields.values(), document_id))
+
+
+def request_cancel(document_id: int) -> bool:
+    """Asks a pending or in-progress document to stop.
+
+    This is cooperative, not preemptive: it sets a flag, and the pipeline
+    checks that flag between units of work (after each chunk during
+    extraction, after each candidate pair during comparison) rather than
+    being interrupted mid-call. An LLM call already in flight when this is
+    set still runs to completion, bounded by its own timeout -- there is no
+    safe way to abort a synchronous HTTP request from another thread
+    without much more machinery than a local prototype needs, and the
+    in-flight call is at most one (LLM_CONCURRENCY defaults to 1), so the
+    delay is bounded and small in practice.
+
+    Returns False without effect if the document is already in a terminal
+    state (done/failed/cancelled) -- there is nothing left to cancel."""
+    doc = get_document(document_id)
+    if doc is None or doc["status"] not in ("pending", "processing"):
+        return False
+    update_document(document_id, cancel_requested=1)
+    return True
+
+
+def is_cancel_requested(document_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT cancel_requested FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        return bool(row and row["cancel_requested"])
 
 
 def get_document(document_id: int) -> Optional[dict]:

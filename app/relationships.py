@@ -441,8 +441,20 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
         "hybrid_promotions": hybrid_promotions,
         "candidate_retrieval_seconds": round(candidate_retrieval_seconds, 3),
         "llm_reasoning_seconds": 0.0,
+        # Set when a user-requested stop interrupted this stage. Pairs
+        # already judged before the stop are still stored below (real LLM
+        # work is never discarded); pipeline.py checks this to skip the
+        # coherence stage and mark the document 'cancelled' rather than
+        # 'done'.
+        "cancelled": False,
     }
     if not jobs:
+        return summary
+
+    if db.is_cancel_requested(document_id):
+        # Stopped between stages -- before any candidate pair in this batch
+        # was even judged. Nothing to store, nothing to wait on.
+        summary["cancelled"] = True
         return summary
 
     def run_job(job):
@@ -468,9 +480,22 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             results[idx] = future.result()
             done_count += 1
             db.set_progress(document_id, "comparing", done_count, total_jobs, None)
+
+            if db.is_cancel_requested(document_id):
+                # Drop everything not yet started; let whatever is already
+                # running finish naturally (bounded by its own timeout --
+                # see request_cancel). Judgments completed before this
+                # point are real LLM work and are stored below exactly as
+                # if the run had finished normally.
+                pool.shutdown(wait=False, cancel_futures=True)
+                summary["cancelled"] = True
+                break
     summary["llm_reasoning_seconds"] = round(time.perf_counter() - t0, 3)
 
-    for job, result, cache_hit, exc in results:
+    # A cancelled run leaves trailing None entries for jobs that were
+    # dropped before starting (cancel_futures=True) or never got the
+    # chance to run -- entries are only ever a full 4-tuple or nothing.
+    for job, result, cache_hit, exc in filter(None, results):
         fact, other, score, reason = job
 
         if exc is not None:

@@ -18,6 +18,7 @@ const I = {
   inbox: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`,
   zap: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
   timer: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M9 2h6"/></svg>`,
+  stop: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>`,
 };
 
 // ---------------- utils ----------------
@@ -65,13 +66,46 @@ function animateIn(root) {
   root.querySelectorAll(".rise").forEach((n, i) => { n.style.animationDelay = Math.min(i * 55, 400) + "ms"; });
 }
 
-const STATUS = { done: { i: I.check, l: "Done" }, processing: { i: I.loader, l: "Processing" }, pending: { i: I.clock, l: "Queued" }, failed: { i: I.x, l: "Failed" } };
+const STATUS = { done: { i: I.check, l: "Done" }, processing: { i: I.loader, l: "Processing" }, pending: { i: I.clock, l: "Queued" }, failed: { i: I.x, l: "Failed" }, cancelled: { i: I.stop, l: "Stopped" } };
 function badge(status) {
   const m = STATUS[status] || { i: "", l: status };
   const sp = status === "processing" ? "animation:spin 1.4s linear infinite;" : "";
   return `<span class="badge b-${status}"><span style="display:flex;${sp}">${m.i}</span>${m.l}</span>`;
 }
 if (!$("kf")) { const s = document.createElement("style"); s.id = "kf"; s.textContent = "@keyframes spin{to{transform:rotate(360deg)}}"; document.head.appendChild(s); }
+
+// Cancellation is cooperative on the server (see app/db.py request_cancel):
+// this only sets a flag, so the button immediately shows "Stopping…" while
+// the pipeline notices between the current chunk/candidate pair and the
+// next -- it doesn't claim the job has already stopped.
+const stopping = new Set();
+async function stopDocument(id, onDone) {
+  if (stopping.has(id)) return;
+  stopping.add(id);
+  try {
+    const res = await fetch(`${API}/api/documents/${id}/cancel`, { method: "POST" });
+    if (!res.ok && res.status !== 409) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.detail || `Could not stop document ${id}.`);
+      stopping.delete(id);
+      return;
+    }
+  } catch (e) {
+    alert(`Could not reach the server to stop document ${id}.`);
+    stopping.delete(id);
+    return;
+  }
+  if (onDone) onDone();
+}
+
+function stopButton(id, { small } = {}) {
+  const pending = stopping.has(id);
+  const cls = small ? "btn-icon stop-icon" : "btn-danger-outline";
+  return `<button class="${cls}" title="Stop processing" ${pending ? "disabled" : ""}
+    onclick="event.stopPropagation(); stopDocument(${id}, () => { renderDocTable(); if (S.currentDoc && S.currentDoc.id === ${id}) renderDocument(${id}); })">
+    ${small ? I.stop : `${I.stop}<span>${pending ? "Stopping…" : "Stop"}</span>`}
+  </button>`;
+}
 
 // ---------------- charts ----------------
 
@@ -196,6 +230,7 @@ function go(route) { if (location.hash.slice(1) !== route) location.hash = route
 async function route_(route) {
   const [head, arg] = (route || "overview").split("/");
   const view = VIEWS.includes(head) ? head : "overview";
+  if (view !== "document") clearTimeout(docPoll);
   VIEWS.forEach((v) => $(`view-${v}`).classList.toggle("active", v === view));
   document.querySelectorAll(".sb-item[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".sb-item[data-doc]").forEach((b) => b.classList.toggle("active", view === "document" && b.dataset.doc === arg));
@@ -276,6 +311,8 @@ function renderOverview() {
 
 // ---------------- document detail ----------------
 
+let docPoll = null;
+
 async function renderDocument(id) {
   const host = $("docDetail");
   host.innerHTML = `<div class="grid g4"><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div></div>`;
@@ -327,6 +364,13 @@ async function renderDocument(id) {
 
     ${d.reused_from_document_id ? `<div class="card card-b mb16 small">This upload was byte-identical to document #${d.reused_from_document_id} with the same page selection — its results were reused and no LLM calls were made.</div>` : ""}
     ${d.status === "failed" ? `<div class="card card-b mb16" style="border-color:var(--neg-border);background:var(--neg-soft);color:var(--neg);font-size:12.5px">${esc((d.error_message || "").split("\n")[0])}</div>` : ""}
+    ${d.status === "cancelled" ? `<div class="card card-b mb16" style="border-color:var(--warn-border);background:var(--warn-soft);color:var(--warn);font-size:12.5px">${esc((d.error_message || "Stopped by user.").split("\n")[0])}</div>` : ""}
+    ${(d.status === "pending" || d.status === "processing") ? `
+      <div class="card card-b mb16" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">${badge(d.status)}${d.cancel_requested ? `<span class="small" style="color:var(--warn);margin-left:7px">stopping…</span>` : ""}
+          <div style="margin-top:10px">${progress(d.progress)}</div></div>
+        ${stopButton(d.id)}
+      </div>` : ""}
 
     <div class="grid g2 mb24">
       <div class="card rise">
@@ -400,6 +444,11 @@ async function renderDocument(id) {
     </div>`;
 
   animateIn(host);
+
+  clearTimeout(docPoll);
+  if (d.status === "pending" || d.status === "processing") {
+    docPoll = setTimeout(() => { if (S.currentDoc && S.currentDoc.id === d.id) renderDocument(id); }, 2000);
+  }
 }
 
 // ---------------- knowledge graph ----------------
@@ -702,9 +751,12 @@ async function renderDocTable() {
   const body = $("docBody"); body.innerHTML = "";
   let busy = false;
   for (const d of docs) {
-    if (d.status === "pending" || d.status === "processing") busy = true;
+    const active = d.status === "pending" || d.status === "processing";
+    if (active) busy = true;
+    const stoppingTag = d.cancel_requested ? `<span class="small" style="color:var(--warn);margin-left:7px">stopping…</span>` : "";
     const cell = d.status === "processing"
-      ? `<div style="min-width:220px">${badge(d.status)}<div style="margin-top:8px">${progress(d.progress)}</div></div>` : badge(d.status);
+      ? `<div style="min-width:220px">${badge(d.status)}${stoppingTag}<div style="margin-top:8px">${progress(d.progress)}</div></div>`
+      : `${badge(d.status)}${stoppingTag}`;
     const tr = el(`<tr class="clickable">
       <td><div style="display:flex;align-items:center;gap:10px">
         <span class="sb-dot" style="background:${docColor(d.id)}"></span>
@@ -712,7 +764,10 @@ async function renderDocTable() {
       </div></td>
       <td>${cell}</td><td class="r">${d.num_pages ?? "—"}</td><td class="r">${d.fact_count}</td>
       <td class="small">${new Date(d.uploaded_at * 1000).toLocaleString()}</td>
-      <td><a href="${pdfLink(d.id, 1)}" target="_blank" onclick="event.stopPropagation()"><button class="btn-icon" title="Open PDF">${I.ext}</button></a></td></tr>`);
+      <td style="display:flex;gap:6px">
+        ${active ? stopButton(d.id, { small: true }) : ""}
+        <a href="${pdfLink(d.id, 1)}" target="_blank" onclick="event.stopPropagation()"><button class="btn-icon" title="Open PDF">${I.ext}</button></a>
+      </td></tr>`);
     tr.addEventListener("click", () => go(`document/${d.id}`));
     body.appendChild(tr);
     if (d.status === "failed" && d.error_message) body.appendChild(el(`<tr class="notice err"><td colspan="6">${esc(d.error_message.split("\n")[0])}</td></tr>`));
