@@ -69,30 +69,47 @@ PDF ──► page text ──► overlapping chunks ──► [LLM] extract fac
    a stronger thing than a confidence score, because the system produces evidence of its own
    mistakes rather than an opinion about them.
 
-### Two ideas here I haven't seen elsewhere
+### The design principle
 
-**Arithmetic self-validation** (`app/arithmetic.py`). Financial documents are full of internal
-invariants — a total equals the sum of its parts. Nothing tells the system those identities exist;
-it searches for `a + b ≈ c` among facts sharing a unit, period and scope. On the real balance sheet
-it independently discovered `liabilities + equity = assets` and
-`share capital + other equity = total equity`, both at 0.00% error, with no accounting rules
-encoded anywhere. That's extraction validation with no answer key. And a near-miss that resolves
-only if one value is rescaled by a power of ten is a very specific signal: a denomination misread,
-not a data conflict.
+**The LLM proposes. Deterministic code verifies, normalizes and challenges it.**
 
-**Graph coherence** (`app/coherence.py`). Because `corroborates` asserts equality and equality is
-transitive, a triangle with two `corroborates` and one `contradicts` cannot occur in a correct
-graph. On the real 348-relationship graph: **196 closed triangles, 25 logically impossible (12.8%),
-62 edges implicated, 126 further edges deducible for free.** Blame is assigned by the facts' own
-numbers rather than model confidence — confidence turned out to be actively misleading here, since
-the false `corroborates` edges came back at 1.0 while the correct `reconciled` edge sat at 0.8.
+The model is used only where language understanding is genuinely required — deciding whether
+"net worth" and "total equity" name the same concept, or whether a difference has a stated
+reason. It is not used for anything with a computable answer, and it is not given final authority
+over the things it is bad at.
 
-Both follow the same principle, which is the one idea the project is really built on: **use the
-LLM only for what needs language understanding, and let arithmetic and logic check its work.**
+| Question | Answered by | Why |
+|---|---|---|
+| What facts does this page state? | LLM | Genuinely open-ended |
+| Is this quote really in the source? | Code | Exact string search; no judgment needed |
+| Does the quote support the value? | Code | Digit comparison; the model checking itself would inherit its own error |
+| Is ₹8,142 Cr the same as ₹81,415.38M? | Code | Arithmetic |
+| Are FY24 and FY2023-24 the same period? | Code | Calendar logic |
+| Is "net worth" the same as "total equity"? | **LLM** | Requires world knowledge |
+| Do these figures add up? | Code | Arithmetic |
+| Is this set of judgments self-consistent? | Code | Logic |
 
-**Performance, benchmarks, and the experiments that failed:** see [PERFORMANCE.md](PERFORMANCE.md).
+Every deterministic result is handed *to* the model as a finished answer rather than left for it
+to infer. The judge prompt receives "these agree to 0.006%", "period: SAME", "scope: UNKNOWN" —
+it does not receive two numbers and a hope.
 
----
+### Two ideas the project actually contributes
+
+**Arithmetic self-validation** (`app/arithmetic.py`). Documents are full of internal invariants —
+a total equals the sum of its parts. Nothing tells the system those identities exist; it searches
+for `a + b ≈ c` among facts sharing a unit, period and scope. On the real balance sheet it
+discovered `liabilities + equity = assets` and `share capital + other equity = total equity`,
+both at 0.00% error, with no accounting rules encoded anywhere. That is extraction validation with
+no answer key. A near-miss resolving only if one value is rescaled by a power of ten is a specific
+signal: a denomination misread, not a data conflict.
+
+**Graph coherence** (`app/coherence.py`). `corroborates` asserts equality, and equality is
+transitive, so a triangle with two `corroborates` and one `contradicts` cannot occur in a correct
+graph. Its existence is a *proof* that one of those three judgments is wrong — with no ground
+truth, no reviewer and no extra model call. On the live graph: 196 closed triangles, 25 logically
+impossible, 62 edges implicated, and 126 further edges deducible for free.
+
+Both are instances of the same principle: arithmetic and logic checking the model's work.
 
 ## Setup and Run Instructions
 
@@ -142,55 +159,140 @@ contradiction / extraction failure) with their source evidence, and the Extracti
 ### What counts as a "fact," and why the schema is generic
 
 A fact is stored as `{subject, attribute, value, value_numeric, unit, time_period, scope,
-statement, quote, confidence}` rather than as fixed columns like `revenue` or `director_name`.
-`attribute` is an open vocabulary the model fills in per page — that's what the assignment asks
-for ("the documents should guide what counts as a fact") and it's also what lets a brand-new PDF
-about a completely different subject introduce new kinds of facts without a schema migration
-(one of the suggested extensions).
+statement, quote, evidence_status, confidence}` rather than as fixed columns like `revenue` or
+`director_name`. `attribute` is an open vocabulary the model fills in per page — that's what the
+assignment asks for ("the documents should guide what counts as a fact") and it's what lets a
+brand-new PDF about a completely different subject introduce new kinds of facts without a schema
+migration.
 
-Every fact must carry a `quote`: an exact, verbatim excerpt from the page it came from. After the
-model responds, the code independently checks whether that quote actually appears on the page
-(exact match, then a whitespace-normalized fuzzy match) — a quote that doesn't check out gets
-stored anyway but flagged `quote_grounded: false` and surfaced in the UI with a warning, rather
-than silently trusted. This is the core of "linking every fact to evidence": the grounding check
-runs in code, not by asking the model to grade its own homework.
+### Evidence grounding: two questions, not one
 
-### Pipeline
+Every fact carries a `quote`: a verbatim excerpt from its page. But checking that a quote *exists*
+is much weaker than checking that it *supports the fact*, and treating the two as equivalent hid
+real errors. Measured across 336 extracted facts, two failure classes were sitting behind a green
+"quote verified" badge:
 
 ```
-PDF --(PyMuPDF)--> page text --(chunk if >MAX_CHUNK_CHARS)--> per-chunk LLM call (bounded
-  concurrency, content-hash cache) --> facts (grounded in quotes) --> batched local embeddings
-  --> SQLite
-                                          |
-                                          v
-                          compare new facts against existing corpus
-                          (embedding similarity shortlist -> LLM judges, cached, bounded
-                           concurrency -> corroborates / contradicts / reconciled / unrelated)
-                                          |
-                                          v
-                                   relationships table
+value = 779    quote = "Number of complaints filed during the year"     ← a table ROW LABEL
+value = 35.69% quote = "35.69%"                                          ← circular: the quote IS the value
 ```
 
-**Extraction** is one LLM call per chunk (pages are chunked with overlap if unusually long), asking
-the model to decide what's checkable on that page and ground each claim in a quote. No per-document
-prompts, no regex tuned to a specific filing format. A content-hash cache means the same chunk
-text is never sent to the model twice, and a bounded thread pool (`LLM_CONCURRENCY`) lets
-independent chunks run concurrently when the hardware supports it — see Performance below for how
-both were actually tuned.
+The first is not the model inventing text — the quote is genuinely on the page. It's a row label,
+and the number lives in a cell the PDF flattening separated from it.
 
-**Cross-document comparison** is the part the assignment calls out as the interesting bit. Doing
-an LLM call for every pair of facts is O(n²) and gets expensive fast. Instead:
-1. Every fact's `statement` is embedded locally (`sentence-transformers`, free, no API call).
-2. For each *new* fact, the top-K most similar facts already in the database (cosine similarity,
-   local `numpy` dot product — no vector DB needed at this scale) are shortlisted as candidates.
-3. Only those candidates get an actual LLM call, which returns one of `corroborates` /
-   `contradicts` / `reconciled` (with the specific reconciling context) / `unrelated`, plus a
-   one-to-three-sentence explanation citing what drove the decision.
+So grounding is two independent verdicts (`app/evidence.py`):
 
-This is also what makes ingestion **incremental**: uploading document N+1 only compares its new
-facts against the pool of facts already stored (from any prior document) plus its own new facts —
-it never re-scans documents 1..N against each other. Uploading a 4th, 5th, 100th document doesn't
-get more expensive per-document.
+| status | meaning |
+|---|---|
+| `ungrounded` | the quote is not verbatim in the source |
+| `quote_grounded` | the quote is real, but does not support the extracted value |
+| `fact_validated` | the quote is real **and** supports the value |
+
+Only the value can downgrade a fact. Unit, subject and period are computed and reported but never
+used to reject, because all three are routinely stated once in a table header rather than inside
+the quoted sentence — rejecting on their absence would flag most correct facts.
+
+No LLM call is made to check the LLM. Asking the model whether it was right about its own output
+would inherit the very error being looked for.
+
+### Table structure: recovering what flattening destroys
+
+The row-label failure above traces to PDF text extraction. Reading-order text collapses a grid
+into a vertical token stream, and every column relationship is gone:
+
+```
+FY24 / FY23 / FY22 / Male / Female / Total / Male / ... / Permanent Employees / 35.69% / 45.15% / ...
+```
+
+`app/tables.py` recovers rows by clustering word coordinates on their vertical midpoint and cells
+by splitting on horizontal gaps, giving:
+
+```
+FY24 | FY23 | FY22
+Male | Female | Total | Male | Female | Total | Male | Female | Total
+Permanent Employees | 35.69% | 45.15% | 36.36% | 41.93% | 43.26% | 42.02% | ...
+```
+
+Multi-column pages are split at their gutters first — without that, a page holding two side-by-side
+tables produces rows splicing cells from both, which is worse than the flattened text because it
+invents adjacency the page never had.
+
+**Measured effect on page 52:** evidence-validated facts went from **2 of 17 (12%) to 11 of 13
+(85%)**. Fewer facts, and that is the point — the flattened run was producing facts it could not
+evidence.
+
+It runs *only* on pages that look tabular, and falls back to plain text if reconstruction loses
+content, so prose pages are untouched.
+
+### Numeric normalization
+
+`app/normalize.py` reduces `(value, unit)` pairs to a common base deterministically — Indian and
+international scale words (crore, lakh, million, billion), currency symbols and codes, percentages
+and basis points, commas, parenthesised negatives. `original_unit` is preserved alongside the
+normalized value; nothing about the source representation is destroyed.
+
+It refuses rather than guesses: an unparseable unit, or two units that don't reduce to a common
+base, returns "not comparable" instead of a fabricated percentage difference. And when two values
+for the same metric differ by more than 100×, it flags the comparison as a probable unit-metadata
+error rather than reporting a confident contradiction — a right answer for the wrong reason is
+worse than an admitted gap.
+
+### Temporal and scope normalization
+
+"FY24", "FY2023-24" and "fiscal year ended March 31, 2024" are one period written three ways, and
+a model comparing those strings has no reason to know it. `app/context.py` computes period and
+scope compatibility in code and hands the verdict to the reasoning step:
+
+| relation | example |
+|---|---|
+| `same` | FY24 vs FY2023-24 |
+| `different` | FY24 vs FY23 |
+| `overlapping` | Q1 FY25 inside FY25; a fiscal year against a calendar year |
+| `unknown` | "previous year" — unresolvable without the document's own reporting date |
+
+**Unknown is a real answer and never guessed.** Inventing precision here is worse than admitting
+the gap: a wrong "different period" reading turns a genuine contradiction into a false
+reconciliation, so the system would explain away a real conflict.
+
+Scope uses contrastive pairs (consolidated/standalone, gross/net, continuing/discontinued,
+actual/forecast) rather than an accounting ontology. Words from one side are synonyms —
+"consolidated" and "group" name one scope — and an unfamiliar qualifier is compared as a plain
+token rather than dropped, so another domain's vocabulary still works.
+
+### Relationship reasoning
+
+```
+Fact A + Fact B
+   │
+   ├─ candidate retrieval (embedding + entity + lexical + numeric signals)
+   │     records WHY the pair was selected
+   ▼
+STEP 1 — same metric?  [LLM]
+   │   names each fact's SLICE first (segment / geography / "whole"),
+   │   because a part compared against its own total manufactures a
+   │   false contradiction out of an expected difference
+   ├─ no ──► unrelated (stop — step 2 is never called)
+   ▼ yes
+DETERMINISTIC CHECKS  [code]
+   normalized value comparison · period comparison · scope comparison
+   ▼
+STEP 2 — how do they relate?  [LLM]
+   given those three computed verdicts, not asked to derive them
+   ▼
+corroborates · contradicts · reconciled · uncertain
+   ▼
+GRAPH COHERENCE  [code] — challenges the result against every other judgment
+```
+
+Splitting into two calls was not free, and was done because a single call reliably failed at the
+point where its sub-questions interact: the model could recognise two terms as synonymous and then
+fail to notice the values disagreed. Step 2 is skipped entirely when step 1 says no, which is the
+common case, so the second call is only paid on pairs that were going to produce a real answer.
+
+**`uncertain` is a real verdict.** A system that can only answer corroborates / contradicts /
+reconciled must force every judged pair into one of them, and that failure is silent. When the
+values differ but the period determination came back UNKNOWN, "the evidence does not settle this"
+is the correct answer, and it is stored and shown.
 
 ### The four required cases
 
@@ -450,24 +552,24 @@ supported by targeted tests, not an empirical result.
   coordinate pair — isn't supported yet. Next step: an optional `extra_json` column for
   fact-type-specific structured data beyond the generic fields.
 - **No authentication/multi-tenancy** — fine for a local prototype, not for shipping.
-- **Numeric unit conversion and cross-terminology value comparison is left entirely to the LLM's
-  judgment** during relationship classification, rather than normalized programmatically. This is
-  a real, demonstrated weak point, not a hypothetical one: direct testing found the local model
-  can correctly recognize "net worth" and "total equity" as the same concept but then fail to
-  notice their values actually disagree (calling it `corroborates`), and separately fails to
-  recognize "revenue from operations" and "revenue from services" as comparable at all (see case
-  4). Next step: a small programmatic layer that normalizes common unit pairs (crore ↔ million)
-  and flags a same-magnitude numeric mismatch explicitly in the prompt, rather than asking the
-  model to both recognize terminology synonymy *and* do the arithmetic unassisted in one call.
-- **Embedding-based candidate shortlisting can silently miss a real relationship** if the two
-  facts' wording isn't close enough in the embedding model's vector space, even when they're
-  the same underlying claim — measured directly: "net worth" vs. "total equity" facts scored
-  0.41 cosine similarity, under the original 0.45 threshold (now 0.40, informed by this exact
-  measurement — see Performance above). Lowering the threshold is a partial mitigation, not a
-  fix: it surfaces more true candidates but also more noise, and doesn't eliminate the
-  underlying gap. Next step worth trying: expand each fact's embedding input with a short
-  LLM-generated list of synonym metric names before embedding, so semantically-equivalent but
-  differently-worded facts land closer together without lowering the threshold for everyone.
+- **Relationship precision is measured by self-consistency, not against human labels.** A
+  corpus-wide audit removed 142 false positives and relabelled 33, all toward the more careful
+  label; graph coherence then *proved* that 25 errors remain (12.8% of closed triangles). Both are
+  strong evidence, but neither is ground truth. Converting them into a true precision figure needs
+  a hand-labelled sample, which has not been done.
+- **Table reconstruction handles grids, not every layout.** Rows and columns are recovered from
+  word coordinates and multi-column pages are split at their gutters, which took evidence
+  validation on a table page from 12% to 85%. It does not merge spanning cells, identify header
+  rows semantically, or handle nested tables. A page whose columns are separated by less than
+  normal word spacing will still under-split.
+- **Period parsing covers common forms, not all of them.** Fiscal years, spans, quarters and
+  as-of dates parse; anything else reports UNKNOWN rather than being guessed, which is the safe
+  direction but still a gap. Relative periods ("previous year") cannot be resolved at all without
+  tracking each document's own reporting date, which is not currently extracted.
+- **The 8B local model remains the accuracy ceiling.** Most of the deterministic scaffolding in
+  this project exists to work around it -- normalization, evidence checking, coherence. A larger
+  model would need less of that, and the architecture supports swapping one in by changing
+  configuration alone.
 
 ## Additional Notes
 

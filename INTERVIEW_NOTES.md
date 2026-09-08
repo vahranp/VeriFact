@@ -1,338 +1,304 @@
 # Interview Notes
 
-Questions I expect to be asked about this project, with honest answers. Where a claim has a
-number behind it, the number is from a real measured run — see [PERFORMANCE.md](PERFORMANCE.md).
+Answers to the questions I expect about VeriFact. Every claim with a number behind it comes from a
+real measured run — see [PERFORMANCE.md](PERFORMANCE.md). Nothing here describes functionality
+that doesn't exist.
 
 ---
 
-### 1. What is the hardest problem in this project?
+## 1. What problem does VeriFact solve?
 
-Not extraction — deciding whether two facts actually conflict. `₹8,142 Cr` and `₹81,415.38 million`
-are the same number written two ways, and `net worth` and `total equity` are the same concept
-written two ways. A naive system reports the first as a contradiction and misses the second
-entirely. Both failures look identical from the outside: a wrong label on a pair of facts.
+Organisations hold the same fact in many documents, stated differently, and nobody knows when two
+of those statements disagree. An annual report says revenue was ₹81,415.38 million; an earnings
+deck says ₹8,142 crore. Are those the same number or a discrepancy? A balance sheet says total
+equity is ₹91,446.46M while a sustainability report says net worth is ₹85,466.74M — same concept,
+different figures, no explanation.
 
-### 2. Why did you split classification into two LLM calls? Doesn't that double cost?
+VeriFact ingests PDFs, extracts facts each tied to a verbatim quote, and classifies pairs of facts
+as **corroborating**, **contradicting**, **reconcilable by context**, or **uncertain**. The output
+is an auditable chain: relationship → fact → evidence → page.
 
-Because a single call reliably failed at the point where its sub-tasks interact. An 8B model can
-recognise "net worth = total equity" when asked directly, and can convert crore to million when
-asked directly, but asked to do both *inside one judgment* it would recognise the concepts as
-equivalent and then fail to notice the values disagreed.
+## 2. Why is this not just RAG?
 
-It doesn't double cost in practice: step 2 is skipped entirely when step 1 says the facts aren't
-the same metric, which is the common case — most candidate pairs are unrelated. So the extra call
-is only paid on pairs that were going to produce a real answer anyway.
+RAG retrieves passages to answer a question. It has no opinion about whether the passages it
+retrieved agree with each other — if two documents conflict, a RAG system will happily quote one
+and never notice the other exists.
 
-### 3. Why does unit conversion happen in Python instead of in the prompt?
+VeriFact's entire product *is* the disagreement. There's no query. The system compares facts
+against each other and reports conflicts nobody asked about. Retrieval here is an internal cost
+optimisation — a way to avoid O(n²) LLM calls — not the feature.
 
-Because it's deterministic and the model is not. `app/normalize.py` reduces both values to a common
-base and hands the model a finished comparison — "these agree to 0.006%" — rather than asking it to
-do arithmetic. This is the single change that fixed the `₹8,142 Cr` vs `₹81,415.38M` case, which
-went from `unrelated` to `corroborates` at confidence 1.0.
+## 3. Why is it not just a knowledge graph?
 
-The general principle: use the LLM for the part that genuinely needs language understanding
-(is "net worth" the same thing as "total equity"?) and use code for everything that has a right
-answer.
+It is a graph, but a knowledge graph normally stores asserted truth: an edge means "this holds".
+Here an edge is a *judgment about two claims*, carrying its own evidence, confidence, and the
+reason the pair was compared at all.
 
-### 4. What happens when the model hallucinates a quote?
+And the graph is treated as fallible rather than authoritative. `app/coherence.py` looks for
+triangles that cannot all be true and reports its own edges as suspect. A knowledge graph asserts;
+this one argues with itself.
 
-It gets caught. Every fact must carry a verbatim quote, and after the model responds the code
-checks whether that string actually appears on the source page — exact match first, then
-whitespace-normalized. A quote that fails gets one re-grounding retry, which can only ever
-*upgrade* a fact (the retry runs through the same verification), never fabricate one. If it still
-fails, the fact is stored but flagged `quote_grounded: false` and surfaced in the UI with a
-warning.
+I also deliberately didn't reach for Neo4j. The data is a few hundred facts and a few hundred
+edges. Triangle enumeration over that in Python takes milliseconds. A graph database would have
+added an install step and operational surface for no measurable benefit.
 
-The grounding check runs in code. Asking the model to grade its own homework would be worthless.
+## 4. Why Ollama?
 
-### 5. Tell me about something you built and then threw away.
+Three reasons, in order of how much they mattered.
 
-A hybrid candidate retriever. Candidate selection was pure embedding similarity, and I suspected a
-blind spot: "net worth" and "total equity" share no vocabulary, so embeddings might rank them
-poorly. I built three additional signals — entity agreement, attribute token overlap, normalized
-numeric agreement — plus a wider scan window.
+It runs locally with no API key and no cost, so a reviewer can clone the repo and run it in five
+minutes. Financial and internal documents are exactly the kind of data people are unwilling to
+send to a third party. And it forced the architecture to be good: an 8B model gets things wrong
+often enough that I had to build deterministic verification around it, and that scaffolding —
+normalization, evidence checking, coherence — is what makes the project interesting.
 
-Benchmarked on 304 real facts, the new signals rescued **at most 3 pairs** across every window
-size, while widening the window from K=4 to K=12 tripled candidate pairs from 786 to 2,339 — each
+It's configuration, not architecture. `LLM_PROVIDER=openai_compatible` plus a base URL and key
+switches to any hosted provider; only `app/llm_client.py` knows the difference.
+
+## 5. Why embeddings?
+
+To avoid comparing every fact against every other fact. With 336 facts, exhaustive comparison is
+~56,000 pairs at 1–2 LLM calls each. At local inference speed that never finishes.
+
+Embedding similarity shortlists ~4 neighbours per fact, which is what makes ingestion feasible.
+`all-MiniLM-L6-v2` runs locally on CPU, and cosine similarity over a few hundred vectors in numpy
+is faster than a network round trip to a vector database — which is why there isn't one.
+
+## 6. Why hybrid retrieval, and did it work?
+
+The suspicion was a blind spot: "net worth" and "total equity" are the same concept but share no
+vocabulary, so embeddings might rank them poorly. I built three additional signals — entity
+agreement, attribute overlap, normalized numeric agreement — plus a wider scan window.
+
+**Benchmarked on 304 real facts, the new signals rescued at most 3 pairs at any window size**,
+while widening the window from K=4 to K=12 tripled candidate pairs from 786 to 2,339 — each
 costing 1–2 LLM calls. The hypothesis was wrong: MiniLM already scores same-entity, same-attribute
-pairs above threshold, so my new signals correlated with the embedding score rather than adding
-to it.
+pairs above threshold, so my signals correlated with the embedding score rather than adding to it.
 
-I reverted the window to K=4 (identical cost to the original, zero pairs dropped) and kept only
-the part that pays for itself: the signals now record *why* each pair was retrieved into
-`relationships.candidate_reason`, which makes a missing relationship diagnosable instead of a
-silent gap.
+I reverted the window and kept only the part that pays for itself: the signals record *why* each
+pair was retrieved into `relationships.candidate_reason`, which turns a missing relationship into
+something diagnosable instead of a silent gap.
 
-### 6. What did testing on real data catch that unit tests didn't?
+One signal was removed outright — attribute overlap alone added **1,235 junk candidates**, because
+annual reports label dozens of different people with the identical attribute "Director status".
 
-The arithmetic self-validation module passed a clean 5-number synthetic balance sheet. Run over 41
-real extracted facts it reported 5 identities and 9 scale anomalies — **3 identities and all 9
-anomalies were false**.
+## 7. Why deterministic normalization?
 
-Two defects, neither visible synthetically:
+Because it has a right answer, and the model doesn't reliably produce it. `app/normalize.py`
+reduces values to a common base — crore, lakh, million, billion, currency symbols, percentages,
+basis points, parenthesised negatives — and hands the reasoning step a finished comparison:
+"these agree to 0.006%".
 
-- "Other equity" (90,709.67) sits 0.81% from "total equity" (91,446.46), so with a 0.5% tolerance
-  *on the total*, any second addend between ~280 and ~1,190 completed a passing identity. Three
-  unrelated figures did. Fixed by also requiring the miss to be small relative to the **smaller**
-  addend.
-- With 13 figures spanning three orders of magnitude, some pair always sums to within 2% of 10×
-  another. Fixed by tightening to 0.5% and requiring the three facts to actually disagree on their
-  stated unit — a scale anomaly *is* a unit inconsistency.
+`original_unit` is preserved alongside, so the source representation is never destroyed.
 
-After: 2 identities, both genuine, both at 0.00% error; 0 anomalies. The lesson is that a
-synthetic fixture small enough to reason about is too small to expose density-driven failures.
+It refuses rather than guesses. Units that don't reduce to a common base return "not comparable"
+instead of a fabricated percentage difference. The same applies to periods: `app/context.py` knows
+"FY24" and "FY2023-24" are one period, and reports UNKNOWN rather than guessing when it can't tell.
 
-### 7. The arithmetic module — isn't that just hardcoded accounting rules?
+## 8. Why doesn't the LLM have final authority over numerical comparison?
 
-No, and that's the point. There is no table of equations anywhere in `app/arithmetic.py`. It
-searches for value triples where a + b ≈ c among facts sharing a comparable unit, time period and
-scope, and reports what it finds.
+Because I measured what happens when it does, and because I have a concrete case where model
+confidence pointed at the wrong answer.
 
-On the real balance sheet it independently discovered `liabilities + equity = assets` and
-`share capital + other equity = total equity`, both at 0.00%. The same code finds
-`engineering headcount + sales headcount = total headcount` with no changes, which is the test that
-proves it isn't secretly domain-specific.
+In a broken coherence triangle, the false `corroborates` edge came back at **confidence 1.0** while
+the correct `reconciled` edge sat at **0.8**. My first blame heuristic picked the least-confident
+edge — and therefore accused the right answer. Confidence was not just uninformative, it was
+actively inverted.
 
-### 8. Why does that matter? What does it buy you?
+So arithmetic adjudicates. An edge claiming two facts corroborate while their normalized values
+differ is wrong regardless of how certain the model sounded. `app/normalize.py` has no opinion.
 
-It's extraction validation that doesn't need a ground-truth answer key. If numbers pulled out of a
-document satisfy an arithmetic identity they didn't have to satisfy, that's independent evidence
-they were read correctly. And a near-miss that resolves only if one value is rescaled by a power
-of ten is a very specific signal: that's a denomination misread, not a data conflict.
+## 9. How does evidence grounding work?
 
-### 9. What's the biggest limitation of that approach?
+Every fact must carry a verbatim quote. After the model responds, code checks whether that string
+appears on the source page — exact match first, then whitespace-normalized. A failure gets one
+re-grounding retry, which runs through the same verification and can therefore only ever *upgrade*
+a fact, never fabricate one.
 
-A document whose figures are **uniformly** mis-denominated is invisible to it. If every number on a
-page is off by the same factor, the identities still close perfectly — internal consistency is
-blind to a constant. That's tested explicitly rather than left as an assumption.
+That's necessary but not sufficient, which is the more interesting half. See the next answer.
 
-### 10. Describe a bug that came from your own architecture, not the model.
+## 10. How do you detect hallucinated or inadequate evidence?
 
-Page 68 of the annual report says "All amounts in Indian Rupees in million" once, at the top.
-Chunking put that sentence in chunk 0 while "Total Equity" landed in chunk 1 — which therefore had
-no denomination anywhere in it. The model did the only reasonable thing and recorded the unit as
-bare `INR`, making every comparison against it wrong by a factor of a million.
+Splitting grounding into two questions:
 
-The fix was to propagate a page-level context header into subsequent chunks of that page,
-deliberately kept *outside* the chunk's `text` field so quote grounding still verifies against
-real chunk content. After the fix those facts extract as `INR million`.
+- **QUOTE_GROUNDED** — is this text really in the source?
+- **FACT_VALIDATED** — does that text actually support the claimed value?
 
-### 11. How do you avoid confidently reporting a contradiction that's really a unit error?
-
-`compare_values` sets a `magnitude_suspect` flag when two values for the same metric differ by
-more than 100×. When set, the prompt explicitly tells the model this comparison is unreliable and
-must not be treated as evidence of a contradiction.
-
-This is deliberately choosing a *less* impressive output. Without it the system would have called
-the net-worth/equity pair a contradiction with high confidence — the right label for entirely the
-wrong reason, which is worse than a hedge, because it would have hidden a real data bug behind a
-correct-looking answer.
-
-### 12. Where does the time actually go?
-
-Fact extraction — the LLM call — is ~93% of wall-clock. PDF parsing and embeddings together are
-under 2%. I profiled before optimizing, which is why I didn't spend effort on the PDF layer.
-
-### 13. What made the biggest performance difference?
-
-Asking for every fact on a chunk in **one** structured response instead of one call per fact, and
-caching on content hash so re-processing a seen chunk costs ~0s. A representative page went from
-20–30+ minutes to ~4 minutes.
-
-### 14. Why is `LLM_CONCURRENCY` set to 1?
-
-Because I benchmarked it and concurrency didn't help. `llama3.1:8b` runs ~64% on CPU on this
-machine, so parallel requests contend for the same saturated resource rather than overlapping.
-Concurrency is implemented and configurable — it would help against a hosted API — but the default
-reflects the measured result on the default backend, not the theoretically nicer number.
-
-### 15. Why SQLite and no ORM? Isn't that a toy choice?
-
-It's the right size for the problem. The data is a few hundred facts and a few thousand
-relationships; an ORM would add indirection without removing any real work, and a server database
-would add an install step to a project someone has to run in five minutes. All writes happen on the
-main thread — only the LLM calls are threaded — which keeps concurrency reasoning trivial.
-
-I'd change this if facts reached the millions, or if multiple writers needed it.
-
-### 16. Why not a vector database?
-
-304 facts. A numpy cosine similarity over an in-memory array is faster than a network round trip to
-a vector DB and has no operational cost. Reaching for Pinecone here would be resume-driven
-development.
-
-### 17. How would this scale to 10,000 documents?
-
-The honest answer is that the current comparison strategy wouldn't survive it. Each new fact is
-compared against the top-K of the whole existing pool, so ingestion cost grows with corpus size.
-At that scale I'd need an ANN index (FAISS) instead of a linear scan, and I'd want to shard
-comparison by entity so facts about different companies never enter each other's candidate pools.
-
-The extraction side scales fine — it's embarrassingly parallel and already cached by content hash.
-
-### 18. What would you do next if you had another week?
-
-Table-aware extraction. I tried PyMuPDF's table API and **rejected it after testing**: the default
-`lines` strategy found only header rows on these documents (no ruling lines to detect), and the
-`text` strategy returned a fragmented 69×21 grid that split words across cells
-(`'Bu'`, `'siness'`, `'Responsibility'`). Adopting it naively would have made extraction worse.
-Doing it properly means reconstructing cell geometry from word positions, which is a real piece of
-work rather than an API call.
-
-### 19. What's the weakest part of the system right now?
-
-Relationship precision. On one document, 92 of 115 candidate pairs were stored as relationships —
-an 80% hit rate that is almost certainly too high, meaning some pairs are being labelled as
-corroborating when they're merely related. I have the mechanism to investigate it now
-(`candidate_reason` records why each pair was retrieved) but I have not yet done the manual
-audit to quantify the false-positive rate, and I'd rather say that than quote a precision number
-I haven't measured.
-
-### 20. What did you learn?
-
-That the instinct to add a component is usually wrong. Three separate times here, the measurement
-said "don't": hybrid retrieval added 3 pairs, concurrency didn't help on local inference, and
-deduplication had literally zero duplicates to remove across 304 facts. Each of those would have
-been a plausible-sounding paragraph in a writeup. Building them and measuring them was the only
-way to find out they were unnecessary — and the projects I'd trust are the ones that ran that
-experiment rather than the ones that assumed the answer.
-
-### 21. What's the worst bug you shipped, and how did you find it?
-
-Confident false contradictions between different revenue segments:
-
-> "Cross Border revenue FY23 was ₹4,552 crore" **contradicts** "revenue from services FY23 was
-> ₹663 crore" — confidence 1.00
-
-Those are different segments, not conflicting reports of one number. I found it by **looking at
-the UI**, not from a test. That's the uncomfortable part: every individual explanation read as
-sound, and the failure is invisible to a test suite that mocks the LLM.
-
-The root cause was a contradiction inside my own prompt. It listed "revenue from services" as an
-unconditional synonym for "revenue". So when I added a rule saying "different segments are
-different metrics", nothing changed — the two instructions conflicted, and the model reasonably
-followed the more specific synonym example over the general rule. My first fix did nothing, and
-that told me more than the bug did.
-
-The real fix makes the model emit `slice_a` / `slice_b` **before** its verdict, so the
-aggregation-level check can't be skipped, and scopes the synonym guidance to pairs whose slices
-already match.
-
-The check I care about is the pair that *didn't* change: cross-border revenue FY24 vs FY23 still
-resolves as `reconciled`, and Case 1 still corroborates at 1.0. A "fix" that labelled everything
-`unrelated` would have looked identical on the failing cases and been worthless.
-
-
-### 22. How do you know your system is wrong, without a ground-truth dataset?
-
-This is the question I'd most want to be asked, because the usual answer — "the model returns a
-confidence score" — is worthless. A model that is confidently wrong reports high confidence.
-
-The relationship graph can prove its own errors. `corroborates` asserts equality, and equality is
-transitive. So if A corroborates B and B corroborates C, then A *cannot* contradict C. A triangle
-of that shape is not suspicious, it is **impossible** — its existence is a proof that at least one
-of those three judgments is wrong.
-
-On the real graph: 196 closed triangles, **25 logically impossible (12.8%)**, 62 edges implicated.
-No ground truth, no reviewer, no extra model call. And it gives a real floor on the error rate:
-at least one edge per violating triangle is wrong, at most 62 are.
-
-This is categorically stronger than the precision audit I did earlier. That measured
-self-consistency — re-judge under a corrected prompt, see what moves — which a systematically wrong
-prompt would pass perfectly. A violated transitivity constraint is not an opinion about the graph;
-it's a contradiction inside it.
-
-### 23. That sounds neat, but does it actually find anything useful?
-
-Yes, and it also corrected me. My first version blamed the least-confident edge in each broken
-triangle. The real data killed that immediately:
+A fact can pass the first and fail the second, and 36% of real extractions did. Two shapes:
 
 ```
-corroborates conf=1.00   revenue 81,415.38  ↔  revenue 72,253.01   ← the actual error
-corroborates conf=0.90   revenue 81,415.38  ↔  revenue 81,415.38   ← correct
-reconciled   conf=0.80   revenue 81,415.38  ↔  revenue 72,253.01   ← correct
+value = 779     quote = "Number of complaints filed during the year"   ← a table ROW LABEL
+value = 35.69%  quote = "35.69%"                                        ← circular; the quote IS the value
 ```
 
-The wrong edge was the *most* confident one. Blaming low confidence accused the right answer.
+The first isn't hallucination — the quote is genuinely on the page. It's a row label, and the
+number came from a cell the PDF flattening separated from it. The second is circular: a quote that
+restates the value evidences nothing.
 
-So blame now goes to the deterministic comparison in `app/normalize.py`, which has no opinion: an
-edge claiming two facts corroborate while their normalized values differ is wrong no matter how
-sure the model sounded. After that change the suspect was correct in every case I sampled. Where
-the numbers can't settle it and confidences tie, it reports the culprit as undetermined rather
-than dressing an arbitrary pick up as a judgment.
+Corpus-wide this is 44.3% fact_validated, 36.0% quote-grounded only, 19.6% ungrounded. The middle
+band used to be invisible and showed a green tick.
 
-### 24. You said widening retrieval didn't work. Did you ever fix the recall problem?
+Only the value can downgrade a fact. Unit, subject and period are reported but never used to
+reject, because all three are routinely stated once in a table header rather than in the quoted
+sentence — rejecting on their absence would flag most correct facts.
 
-Yes — by deduction instead of search, which is the part I'm happiest with.
+**No LLM call is made to check the LLM.** Asking the model whether it was right about its own
+output inherits the very error being looked for.
 
-Widening the candidate window tripled LLM calls to buy 3 pairs of recall, so I reverted it. But
-transitivity means that if A = B and B = C and no A–C edge exists, one is *implied*. That found
-**126 edges at zero marginal cost**, because they're derived from the graph rather than retrieved
-from the corpus.
+## 11. How do you handle tables?
 
-I discard any deduction resting on an edge that a violating triangle implicated (183 → 126).
-Propagating a judgment already known to be broken would turn one error into several, which is
-worse than the missing edge it fills.
+Reading-order PDF text collapses a grid into a vertical token stream, destroying every column
+relationship — this is the root cause of the row-label failures above. `app/tables.py` recovers
+rows by clustering word coordinates on their vertical midpoint, and cells by splitting on
+horizontal gaps wide relative to the row's own character width.
 
-### 25. What's the single idea holding this project together?
+Multi-column pages are split at their gutters first. Without that, a page with two side-by-side
+tables produces rows splicing cells from both — worse than the flattened text, because it invents
+adjacency the page never had. The starter page has a gutter at x=594 and previously produced rows
+like `Permanent Employees | 35.69% ... | Stakeholder | Grievance`.
 
-Use the LLM only for what genuinely needs language understanding, and let arithmetic and logic
-check its work.
+**Measured on page 52: evidence-validated facts went from 2/17 (12%) to 11/13 (85%).**
 
-Every component follows it. Unit conversion is code, not a prompt. Quote grounding is verified in
-code, not self-reported. Arithmetic identities are discovered structurally, with no accounting
-rules encoded. And the graph's own transitivity audits the model's judgments. The model decides
-whether "net worth" and "total equity" mean the same thing — that genuinely needs language. It
-does not decide whether 81,415.38 equals 72,253.01.
+I first tried PyMuPDF's `find_tables()` and **rejected it after testing**: the `lines` strategy
+found only header rows (these documents have no ruling lines), and `strategy="text"` returned a
+fragmented 69×21 grid splitting words across cells (`'Bu'`, `'siness'`). A smaller, predictable
+transformation beat a richer one that was wrong.
 
+It runs only on pages that look tabular and falls back if reconstruction loses content, so prose
+pages are untouched.
+
+## 12. How do you distinguish contradiction from contextual reconciliation?
+
+This is the crux of the assignment, and it's answered in three separated stages rather than one
+classification.
+
+**Stage 1 — same metric?** The model names each fact's *slice* (segment, geography, or "whole")
+before giving a verdict. A part compared against its own total manufactures a false contradiction
+out of an expected difference — the smaller figure is *supposed* to be smaller.
+
+**Stage 2 — deterministic checks.** Values, period and scope are compared in code. Period returns
+same / different / **overlapping** / unknown; overlapping is its own answer because a quarter
+inside its year isn't expected to match and isn't a conflict.
+
+**Stage 3 — the model judges, given those verdicts.** Different period or scope → the difference is
+expected, so `reconciled`, and it must name the reconciling context. Same period and scope →
+unexplained, so `contradicts`. Period UNKNOWN with differing values → `uncertain`, because guessing
+between the two would be asserting more than the evidence supports.
+
+The measured impact of stage 1: a corpus-wide re-audit removed **142 false positives** (revenue
+segments being reported as contradicting each other) with **0 legitimate relabels**.
+
+## 13. How does caching work?
+
+Three layers, all keyed on content rather than filenames:
+
+| layer | key |
+|---|---|
+| document reuse | content hash + page selector + **pipeline fingerprint** |
+| chunk extraction | model + prompt + chunk text + page context |
+| relationship judgment | model + prompt + both facts' content (order-independent) |
+
+Because prompts are in the keys, changing a prompt invalidates affected entries automatically —
+there's no manual cache-busting.
+
+The pipeline fingerprint was added after a real failure. Document-level reuse short-circuits a
+byte-identical upload, and after PDF extraction changed to reconstruct tables, re-uploading a page
+to *measure the improvement* returned the old facts — the bytes hadn't changed. The chunk cache had
+it right; the document short-circuit ran first and never gave it the chance. The fingerprint covers
+what determines extraction output and deliberately excludes what doesn't, so editing a timeout
+doesn't force re-ingesting everything.
+
+## 14. Why can Ollama concurrency hurt performance?
+
+Because the bottleneck is compute, not waiting. `llama3.1:8b` runs roughly 64% on CPU on this
+machine, so parallel requests contend for an already-saturated resource instead of overlapping.
+Concurrency helps when you're blocked on network I/O; local inference isn't.
+
+It's implemented and configurable via `LLM_CONCURRENCY` — it would help against a hosted API — but
+the default is 1 because that's what the benchmark showed on the default backend. The default
+reflects the measurement, not the theoretically nicer number.
+
+## 15. How does incremental ingestion work?
+
+Only new facts are compared. Each new fact is matched against the embedding pool of existing facts
+plus the other new facts in its own batch — so ingesting document N+1 never re-compares documents
+1..N against each other.
+
+Combined with the caches, re-uploading identical content costs one hash and one indexed lookup.
+
+## 16. What happens when the LLM is wrong?
+
+Four independent mechanisms, none of which involve asking the model to check itself:
+
+1. **Evidence verification** catches a value its own quote doesn't support — 10.5% of numeric facts.
+2. **Arithmetic self-validation** finds `a + b ≈ c` identities among extracted numbers, and a
+   near-miss resolving only by a power of ten flags a denomination misread.
+3. **Graph coherence** proves errors logically: two `corroborates` and one `contradicts` in a
+   triangle cannot all be true. 25 of 196 closed triangles are impossible.
+4. **Schema validation** degrades a malformed response to a safe default that asserts nothing, so
+   one bad judgment costs one relationship rather than manufacturing a false one.
+
+And failures are recorded rather than swallowed. A chunk whose LLM call fails becomes an extraction
+issue; the rest of the document continues.
+
+## 17. What is the biggest remaining limitation?
+
+Precision is measured by **self-consistency, not against human labels**. The corpus audit removed
+142 false positives; coherence proves 25 errors remain. Both are strong evidence and neither is
+ground truth — a systematically wrong prompt would pass a self-consistency check perfectly.
+
+Converting that into a real precision number needs a hand-labelled sample of ~40 relationships. I
+haven't done it, and I'd rather say so than quote a figure I can't support.
+
+The 8B model is the underlying ceiling. Most of the deterministic scaffolding exists to work around
+it.
+
+## 18. How would this scale?
+
+The extraction side scales fine — it's embarrassingly parallel and cached by content hash.
+
+The comparison side wouldn't survive 10,000 documents. Each new fact is compared against a linear
+scan of the whole embedding pool, so ingestion cost grows with corpus size. At that scale I'd need
+an ANN index (FAISS) instead of the linear scan, and I'd shard comparison by entity so facts about
+different companies never enter each other's candidate pools.
+
+Coherence checking is O(edges × degree) for triangle enumeration, which is fine into the tens of
+thousands of edges and would need capping beyond that.
+
+SQLite is right for this size and would need replacing well before those limits — but not before
+the retrieval problem bites, which comes first.
+
+## 19. What would you build next?
+
+In order:
+
+1. **Hand-label a precision sample.** It's the one claim I can't currently support, and it's cheap.
+2. **Auto-repair coherence violations.** The mechanism already identifies which edge is wrong using
+   arithmetic; it currently reports rather than fixes. I stopped short deliberately — I don't want
+   it silently rewriting judgments before someone has watched it work.
+3. **Extract each document's reporting date**, which would let relative periods ("previous year")
+   resolve instead of reporting UNKNOWN.
+4. **Header-aware table extraction** — currently rows and cells are recovered but header semantics
+   aren't, so a value's column meaning still depends on the model reading the aligned header row.
 
 ---
 
-## Honest self-assessment
+## Three things I got wrong, and what they taught me
 
-Scored as I'd score someone else's submission. This section is for my own preparation — it is
-deliberately harsher than the README, which states limitations plainly but doesn't editorialize.
+**The hybrid retriever.** I was confident embeddings had a blind spot. I built the fix, benchmarked
+it, and it rescued 3 pairs while tripling cost. I reverted it and kept only the explainability.
+The lesson is that the instinct to add a component is usually wrong, and the benchmark is cheap.
 
-| Category | Score | Reasoning |
-|---|:--:|---|
-| Meets the stated requirements | 9 | All four required cases are implemented and demonstrable; facts are grounded in verified quotes; relationships are classified across and within documents. |
-| Correctness of the hard part | 8 | Case 1 (corroboration across units) is verified fixed end-to-end. Case 2's root cause was found and fixed at the extraction layer, but the specific pair is still blocked by a stale fact from before that fix. |
-| Engineering judgment | 9 | Three components were built, measured, and rejected or reverted. Profiling preceded optimization. The measured negative results are documented as prominently as the wins. |
-| Generalization | 7 | Audited clean of document-specific logic, and the mechanisms are structural rather than rule-based. But it hasn't been run end-to-end on a genuinely different document, so this rests on design argument plus targeted tests. |
-| Testing | 9 | 226 tests, LLM mocked, no Ollama needed. Real-data testing caught defects synthetic fixtures missed, and each became a regression test. Missing: fixture-based end-to-end tests of the four required cases. |
-| Performance | 8 | 20–30 min → ~4 min on a representative page, with the profile that justified each change. Full-document ingestion on dense tables is still slow on local inference. |
-| Precision of results | 8 | Audited corpus-wide: 490 → 348, 142 false positives removed, 33 relabelled — all toward the more careful label. Graph coherence then *proved* 25 remaining errors exist (12.8% of closed triangles) without any ground truth. Known-imperfect and measurably so, which is the honest position. |
-| Documentation | 9 | README leads with a diagram and the two decisions that matter; PERFORMANCE.md carries the numbers and the failures; this file covers the questions. |
-| **Overall** | **8.5** | Strong process, honest reporting, and two mechanisms (arithmetic identities, graph transitivity) that validate the model's work without a ground-truth set. The remaining gap is that no human has labelled a sample to convert those self-proofs into a true precision number. |
+**Blaming low confidence.** In a broken triangle I assumed the least-confident edge was the culprit.
+Real data showed the wrong edge had confidence 1.0 and the correct one 0.8 — I was accusing the
+right answer. Model confidence isn't a reliable signal about model correctness.
 
-### Open issues, by severity
+**The context block I added, that broke Case 1.** I added period/scope determinations to the judge
+prompt, and it appended "a material difference would not be explained by context" whenever periods
+matched — including when the values *agreed to 0.006%*. Case 1 went from `corroborates` to
+`contradicts`. I only caught it because I re-ran the required cases against the current
+implementation instead of trusting they still passed. Context explains a *difference*; when there
+isn't one, saying anything about explaining it is worse than saying nothing.
 
-**BLOCKER** — none. The system runs end to end and produces all four required case types.
-
-**PROVEN, QUANTIFIED** — graph coherence establishes that 25 of 196 closed triangles are
-logically impossible, implicating 62 edges. This is not a suspicion; at least one judgment per
-violating triangle is wrong. The mechanism now reports them; it does not yet repair them.
-
-**HIGH**
-- Precision is measured by *self-consistency* — re-judging under the corrected prompt — not
-  against human labels. The corpus-wide audit removed 142 false positives and relabelled 33, all
-  in the more careful direction, which is strong evidence but not ground truth. Fix: hand-label a
-  sample of 40 surviving relationships and report true precision.
-
-**MEDIUM**
-- `reconciled` can absorb extraction errors: a fact whose quote is the bare string `"8"` was
-  reconciled against `1.4 Mn Tons` on a fabricated unit explanation. A quote carrying no context
-  is not evidence and should be ineligible for reconciliation, checked at extraction time.
-- Case 2's canonical pair still resolves against a fact extracted before the page-context fix, so
-  it demonstrates the `magnitude_suspect` guard rather than the contradiction itself. Fix:
-  re-extract that page with the extraction cache cleared for the affected chunk.
-- No end-to-end regression test pinning the four required cases with fixture documents; the
-  current case scripts need a live model.
-- `UNCERTAIN` / `INSUFFICIENT_EVIDENCE` is supported in the schema but not surfaced through the
-  pipeline or UI, so a low-confidence judgment currently reads the same as a confident one.
-
-**LOW**
-- Table extraction is still linearized text; PyMuPDF's table API was tested and rejected as worse.
-- Candidate retrieval is a linear numpy scan — fine at this scale, needs an ANN index well before
-  10k documents.
-- `candidate_reason` is recorded but not yet displayed in the UI.
+That third one is the most useful. The regression was in a prompt, introduced by an improvement,
+and invisible to a test suite that mocks the LLM.
