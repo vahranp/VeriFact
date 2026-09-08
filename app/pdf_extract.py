@@ -38,8 +38,28 @@ class Chunk:
 PAGE_CONTEXT_CHARS = 260
 
 
+def is_encrypted(pdf_path: str) -> bool:
+    """True when the PDF needs a password to read its content.
+
+    fitz.open() does not raise on an encrypted file, and neither does
+    page_count() -- page count and other metadata are often readable
+    without authentication, so a password-protected upload was sailing
+    straight past the "is this a real PDF?" check at upload time. It only
+    failed later, inside the background job, when something first tried
+    to actually read a page: `ValueError: document closed or encrypted`,
+    surfacing as a raw traceback on the document instead of a clear
+    "this PDF needs a password" message. Checked explicitly, at the same
+    point corruption already is, so both fail the same clean way."""
+    doc = fitz.open(pdf_path)
+    try:
+        return bool(doc.needs_pass or doc.is_encrypted)
+    finally:
+        doc.close()
+
+
 def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
-    """Returns [(page_number, text), ...] for every non-trivial page.
+    """Returns [(page_number, text), ...] for every non-trivial, readable
+    page.
 
     Table-like pages are reconstructed from word coordinates rather than
     taken in reading order (see app/tables.py): flattening a grid into a
@@ -47,13 +67,25 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
     values, which was the direct cause of facts whose quote was a row
     label while the value came from a cell elsewhere. Pages that don't
     look tabular are returned unchanged.
+
+    A page that fails to read at all is skipped rather than aborting the
+    whole document -- the same "one bad unit shouldn't take down
+    everything" principle already applied to per-chunk LLM failures,
+    extended one layer earlier. A real PDF can have one corrupted page
+    object among hundreds of good ones (a malformed embedded image, odd
+    permission bits on a single page); before this, that one page raised
+    an unhandled exception that discarded every other, perfectly good
+    page in the same document.
     """
     doc = fitz.open(pdf_path)
     try:
         pages = []
         for i in range(len(doc)):
-            page = doc.load_page(i)
-            text, _used_layout = layout_aware_text(page)
+            try:
+                page = doc.load_page(i)
+                text, _used_layout = layout_aware_text(page)
+            except Exception:  # noqa: BLE001 - one unreadable page must not sink the document
+                continue
             text = text.strip()
             if len(text) >= MIN_PAGE_CHARS:
                 pages.append((i + 1, text))

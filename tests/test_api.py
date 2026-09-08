@@ -95,6 +95,37 @@ class TestUploadValidation:
         assert r.status_code == 400
         assert "corrupt" in r.json()["detail"].lower()
 
+    def test_a_password_protected_pdf_is_rejected_with_400(self, client, tmp_path):
+        """The real gap this closes: page_count() succeeds on an encrypted
+        PDF without a password (page count is metadata, often readable
+        unauthenticated), so this used to pass validation, start a
+        background job, and fail later with a raw traceback the first
+        time something tried to actually read a page."""
+        import fitz
+        path = str(tmp_path / "encrypted.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "secret content")
+        doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw123", owner_pw="pw123")
+        doc.close()
+
+        with open(path, "rb") as f:
+            r = client.post("/api/documents", files={"file": ("encrypted.pdf", f, "application/pdf")})
+        assert r.status_code == 400
+        assert "password" in r.json()["detail"].lower()
+
+    def test_a_password_protected_upload_creates_no_document_row(self, client, tmp_path):
+        import fitz
+        path = str(tmp_path / "encrypted2.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "secret content")
+        doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw123", owner_pw="pw123")
+        doc.close()
+
+        before = len(client.get("/api/documents").json())
+        with open(path, "rb") as f:
+            client.post("/api/documents", files={"file": ("encrypted2.pdf", f, "application/pdf")})
+        assert len(client.get("/api/documents").json()) == before
+
     @pytest.mark.parametrize("spec,fragment", [
         ("24-24-24", "start-end"),
         ("10-3", "backwards"),

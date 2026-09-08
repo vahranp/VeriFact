@@ -276,3 +276,90 @@ class TestOrphanedJobRecovery:
             assert progress["at"] > 0
         finally:
             self._cleanup(doc_id)
+
+
+class TestEncryptedPdfHandling:
+    """A password-protected PDF used to sail straight through upload
+    validation -- page_count() succeeds on one without a password, since
+    page count is metadata that's often readable unauthenticated -- and
+    only failed later, inside the background job, the first time
+    something actually tried to read a page: a raw
+    "ValueError: document closed or encrypted" surfacing as a stack trace
+    on the document instead of a clear message.
+    """
+
+    @pytest.fixture
+    def encrypted_pdf(self, tmp_path):
+        import fitz
+        path = str(tmp_path / "encrypted.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "secret content")
+        doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw123", owner_pw="pw123")
+        doc.close()
+        return path
+
+    @pytest.fixture
+    def plain_pdf(self, tmp_path):
+        import fitz
+        path = str(tmp_path / "plain.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "ordinary unprotected content well past the minimum page length")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_is_encrypted_detects_a_password_protected_file(self, encrypted_pdf):
+        from app.pdf_extract import is_encrypted
+        assert is_encrypted(encrypted_pdf) is True
+
+    def test_is_encrypted_is_false_for_an_ordinary_pdf(self, plain_pdf):
+        from app.pdf_extract import is_encrypted
+        assert is_encrypted(plain_pdf) is False
+
+    def test_page_count_alone_does_not_reveal_encryption(self, encrypted_pdf):
+        """The property that let this slip past upload validation in the
+        first place: page count succeeds without a password."""
+        from app.pdf_extract import page_count
+        assert page_count(encrypted_pdf) == 1
+
+    def test_extracting_an_encrypted_pdf_degrades_to_zero_chunks_not_a_crash(self, encrypted_pdf):
+        from app.pdf_extract import extract_chunks
+        assert extract_chunks(encrypted_pdf) == []
+
+    def test_an_ordinary_pdf_still_extracts_normally(self, plain_pdf):
+        from app.pdf_extract import extract_chunks
+        chunks = extract_chunks(plain_pdf)
+        assert any("ordinary unprotected content" in c.text for c in chunks)
+
+
+class TestOnePageFailureDoesNotSinkTheDocument:
+    """The same principle already applied to per-chunk LLM failures,
+    extended one layer earlier: a real PDF can have one corrupted page
+    object among hundreds of good ones, and that single page must not
+    discard every other page in the document."""
+
+    def test_a_page_that_raises_on_read_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        import fitz
+        from app import pdf_extract
+
+        path = str(tmp_path / "mixed.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "first good page has real content on it, well past the minimum length")
+        doc.new_page().insert_text((72, 72), "second good page also has real content, well past the minimum length")
+        doc.save(path)
+        doc.close()
+
+        real_layout_aware_text = pdf_extract.layout_aware_text
+        calls = {"n": 0}
+
+        def flaky(page):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("simulated: document closed or encrypted")
+            return real_layout_aware_text(page)
+
+        monkeypatch.setattr(pdf_extract, "layout_aware_text", flaky)
+
+        pages = pdf_extract.extract_pages(path)
+        assert len(pages) == 1, "the failing page is skipped, the good one is kept"
+        assert "second good page" in pages[0][1]

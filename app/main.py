@@ -22,7 +22,7 @@ from app import db
 from app.cache import hash_file
 from app.coherence import check_coherence
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
-from app.pdf_extract import PageSpecError, page_count, parse_page_spec
+from app.pdf_extract import PageSpecError, is_encrypted, page_count, parse_page_spec
 from app.pipeline import process_document
 
 app = FastAPI(title="Fact Knowledge Layer")
@@ -139,6 +139,15 @@ async def upload_document(
     if total_pages == 0:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "That PDF has no pages.")
+
+    # page_count succeeding does NOT mean the PDF is readable -- an
+    # encrypted file reports a real page count without a password, and
+    # only fails once something tries to read actual page content. Caught
+    # here for the same reason corruption is: a clean 400 now, not a raw
+    # traceback on the document after a background job has already started.
+    if is_encrypted(str(dest)):
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "That PDF is password-protected -- please remove the password and re-upload.")
 
     content_hash = hash_file(str(dest))
     page_selector = pages if pages else (f"max:{max_pages}" if max_pages is not None else None)
