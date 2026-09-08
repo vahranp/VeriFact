@@ -21,6 +21,7 @@ from app.api_models import (
 from app import db
 from app.cache import hash_file
 from app.coherence import check_coherence
+from app.normalize import compare_values
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
 from app.pdf_extract import PageSpecError, has_extractable_text, is_encrypted, page_count, parse_page_spec
 from app.pipeline import process_document
@@ -349,10 +350,29 @@ def list_relationships(
     for r in rels:
         fa = db.get_fact(r["fact_id_a"])
         fb = db.get_fact(r["fact_id_b"])
+        cmp = compare_values(
+            fa.get("value_numeric") if fa else None, fa.get("unit") if fa else None,
+            fb.get("value_numeric") if fb else None, fb.get("unit") if fb else None,
+        ) if fa and fb else None
         out.append({
             **r,
             "fact_a": _enrich_fact(fa, cache) if fa else None,
             "fact_b": _enrich_fact(fb, cache) if fb else None,
+            # Recomputed at read time from app/normalize.py -- the same
+            # deterministic logic the judge itself was given, not a
+            # client-side approximation. Without this the UI had no way to
+            # show WHY two differently-worded units (or an outright
+            # mismatch) were or weren't treated as comparable; a viewer
+            # just saw two raw unit labels and had to guess.
+            "normalized_comparison": (
+                {
+                    "comparable": cmp.comparable, "agree": cmp.agree,
+                    "diff_pct": cmp.diff_pct, "common_unit": cmp.common_unit,
+                    "magnitude_suspect": cmp.magnitude_suspect,
+                    "value_a": cmp.value_a, "value_b": cmp.value_b,
+                }
+                if cmp else None
+            ),
         })
     return out
 

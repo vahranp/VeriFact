@@ -26,7 +26,10 @@ const I = {
 const $ = (id) => document.getElementById(id);
 function el(html) { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
 function esc(s) { return s == null ? "" : String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
-function docName(n) { return String(n || "").replace(/^[0-9a-f]{32}_/, "").replace(/\.pdf$/i, ""); }
+// Strips EVERY leading hash prefix, not just one -- a document re-uploaded
+// from an already-renamed stored copy can pick up more than one, and a
+// single non-global replace left the extra one showing.
+function docName(n) { return String(n || "").replace(/^([0-9a-f]{32}_)+/, "").replace(/\.pdf$/i, ""); }
 
 // Several uploads are the same PDF ingested with different page selections,
 // so the filename alone makes them indistinguishable in a list. The page
@@ -627,17 +630,52 @@ $("graphDocFilter").addEventListener("change", renderGraph);
 
 const RI = { corroborates: I.check, contradicts: I.x, reconciled: I.link, uncertain: I.alert };
 
-function delta(a, b) {
-  const x = a.value_numeric, y = b.value_numeric;
-  if (x == null || y == null || !isFinite(x) || !isFinite(y)) return "";
-  // Only compare like with like: an absolute in crore and a margin in percent
-  // are both numbers, but their difference is meaningless.
-  const ua = (a.unit || "").trim().toLowerCase(), ub = (b.unit || "").trim().toLowerCase();
-  if (!ua || !ub || ua !== ub) return "";
-  if (x === y) return `<div class="vcmp"><span>${fmtNum(x)}</span><span class="small">=</span><span>${fmtNum(y)}</span><span class="badge b-corroborates" style="margin-left:auto">exact match</span></div>`;
-  const diff = Math.abs(x - y), base = Math.max(Math.abs(x), Math.abs(y)), pct = base ? (diff / base) * 100 : 0;
-  return `<div class="vcmp"><span>${fmtNum(x)}</span><span class="small">vs</span><span>${fmtNum(y)}</span>
-    <span class="badge ${pct > 1 ? "b-contradicts" : "b-reconciled"}" style="margin-left:auto">Δ ${fmtNum(diff)} ${esc(a.unit)} · ${pct.toFixed(1)}%</span></div>`;
+// Renders the SAME deterministic comparison the model itself was given
+// (app/normalize.py, recomputed server-side in GET /api/relationships) --
+// not a client-side approximation. This replaces an earlier version that
+// only showed anything when both units were an exact string match, so two
+// facts worded "INR Crore" and "INR million" showed nothing at all, even
+// though the backend had already normalized and compared them. A viewer
+// was left staring at two different-looking unit labels with no
+// explanation for why the system called them related.
+function comparisonStrip(r) {
+  const c = r.normalized_comparison;
+  if (!c || !c.comparable) return "";
+
+  if (c.magnitude_suspect) {
+    const ratio = Math.max(Math.abs(c.value_a), Math.abs(c.value_b)) / Math.min(Math.abs(c.value_a), Math.abs(c.value_b));
+    const ratioLabel = ratio < 10 ? ratio.toFixed(1) : fmtNum(Math.round(ratio));
+    return `<div class="cmp-strip cmp-warn">
+      ${I.alert}
+      <div>
+        <div class="cmp-title">Unit mismatch suspected, not a real difference</div>
+        <div class="cmp-sub">These values differ by roughly ${ratioLabel}× once reduced to the same unit
+          (<span class="num">${fmtNum(c.value_a)}</span> vs <span class="num">${fmtNum(c.value_b)}</span> ${esc(c.common_unit)}).
+          That size of gap almost always means one side's unit was recorded incompletely — not that the figures
+          genuinely disagree.</div>
+      </div>
+    </div>`;
+  }
+
+  if (c.agree) {
+    return `<div class="cmp-strip cmp-ok">
+      ${I.check}
+      <div>
+        <div class="cmp-title">Values agree once normalized</div>
+        <div class="cmp-sub"><span class="num">${fmtNum(c.value_a)}</span> ≈ <span class="num">${fmtNum(c.value_b)}</span>
+          ${esc(c.common_unit)} — differ by only ${c.diff_pct.toFixed(1)}%</div>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="cmp-strip cmp-diff">
+    ${I.x}
+    <div>
+      <div class="cmp-title">Values disagree by ${c.diff_pct.toFixed(1)}%</div>
+      <div class="cmp-sub"><span class="num">${fmtNum(c.value_a)}</span> vs <span class="num">${fmtNum(c.value_b)}</span>
+        ${esc(c.common_unit)}, both reduced to the same unit</div>
+    </div>
+  </div>`;
 }
 
 function relCard(r) {
@@ -665,7 +703,7 @@ function relCard(r) {
       <div class="rpair">${box(r.fact_a)}
         <div class="rconn ${r.relation_type}"><div class="ln"></div><div class="ic">${RI[r.relation_type] || ""}</div><div class="ln"></div></div>
         ${box(r.fact_b)}</div>
-      ${delta(r.fact_a, r.fact_b)}
+      ${comparisonStrip(r)}
       <div class="why"><b>Reasoning:</b> ${esc(r.explanation)}</div>
       ${r.reconciliation_context ? `<div class="rctx">${I.link}<span><b>Reconciled by:</b> ${esc(r.reconciliation_context)}</span></div>` : ""}
       ${r.candidate_reason ? `<div class="why prov"><b>Retrieved by:</b> ${esc(r.candidate_reason)}</div>` : ""}

@@ -68,6 +68,20 @@ class FactOut(_Permissive):
     confidence: Optional[float] = None
 
 
+class NormalizedComparisonOut(_Permissive):
+    comparable: bool = Field(description="Both facts had a numeric value and a unit that could be reduced to a common base.")
+    agree: Optional[bool] = Field(default=None, description="Within tolerance once normalized. None when not comparable.")
+    diff_pct: Optional[float] = None
+    common_unit: Optional[str] = None
+    magnitude_suspect: bool = Field(
+        default=False,
+        description="Values differ by an order-of-magnitude ratio typical of an incompletely recorded unit "
+                    "(e.g. one side in 'million', the other missing that scale) rather than a genuine disagreement.",
+    )
+    value_a: Optional[float] = None
+    value_b: Optional[float] = None
+
+
 class RelationshipOut(_Permissive):
     id: int
     fact_id_a: int
@@ -82,6 +96,12 @@ class RelationshipOut(_Permissive):
     )
     fact_a: Optional[FactOut] = None
     fact_b: Optional[FactOut] = None
+    normalized_comparison: Optional[NormalizedComparisonOut] = Field(
+        default=None,
+        description="Deterministic numeric comparison recomputed at read time from app/normalize.py, "
+                    "independent of the relation_type judgment -- surfaces cases like magnitude_suspect "
+                    "that the UI should explain rather than silently drop.",
+    )
 
 
 class IssueOut(_Permissive):

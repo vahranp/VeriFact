@@ -330,7 +330,18 @@ td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .rconn svg { width: 15px; height: 15px; }
 .fbox { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r2); padding: 14px; }
 .fbox .st { font-size: 12.5px; line-height: 1.5; margin: 8px 0 10px; }
-.vcmp { display: flex; align-items: center; gap: 12px; margin-top: 14px; font-family: var(--mono); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r1); padding: 10px 14px; }
+.cmp-strip { display: flex; align-items: flex-start; gap: 11px; margin-top: 14px; padding: 12px 15px; border-radius: var(--r2); border: 1px solid var(--border); background: var(--surface-2); }
+.cmp-strip svg { width: 17px; height: 17px; flex-shrink: 0; margin-top: 1px; }
+.cmp-title { font-size: 12.5px; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+.cmp-sub { font-size: 12px; line-height: 1.55; color: var(--ink-2); }
+.cmp-sub .num { font-family: var(--mono); font-weight: 500; color: var(--ink); }
+.cmp-strip.cmp-ok { background: var(--pos-soft); border-color: var(--pos-border); }
+.cmp-strip.cmp-ok svg { color: var(--pos); }
+.cmp-strip.cmp-diff { background: var(--neg-soft); border-color: var(--neg-border); }
+.cmp-strip.cmp-diff svg { color: var(--neg); }
+.cmp-strip.cmp-warn { background: var(--warn-soft); border-color: var(--warn-border); }
+.cmp-strip.cmp-warn svg { color: var(--warn); }
+.cmp-strip.cmp-warn .cmp-title { color: var(--warn); }
 .why { margin-top: 14px; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r2); padding: 13px 15px; }
 .why b { color: var(--ink); }
 /* Retrieval provenance: why this pair was ever shortlisted for judgment.
@@ -419,8 +430,8 @@ h3.sec { font-size: 13px; font-weight: 650; letter-spacing: .02em; text-transfor
 /* Value / period / scope shown inline on each side of a relationship, so
    the comparison being made is visible without opening the Facts tab. */
 .fmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 8px 0 9px; }
-.fv { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 13px;
-  font-weight: 650; color: var(--ink); }
+.fv { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 15px;
+  font-weight: 700; color: var(--ink); letter-spacing: -.01em; }
 .ftag { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; padding: 2px 7px;
   border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--ink-2); }
 .gstat { margin-top: 9px; }

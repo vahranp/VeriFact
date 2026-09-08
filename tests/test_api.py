@@ -100,6 +100,56 @@ class TestTimelinesEndpoint:
         assert "fact_validated" in stats and "quote_grounded_only" in stats
 
 
+class TestRelationshipComparisonEnrichment:
+    """GET /api/relationships attaches a normalized_comparison computed fresh
+    from app.normalize.compare_values, independent of the relation_type
+    judgment. This is what lets the UI explain a case like two facts with the
+    same digits but "INR" vs "million" units -- the old client-side check
+    only compared unit strings for exact equality and rendered nothing at
+    all when they differed, silently dropping a signal the backend already
+    had (see app/main.py list_relationships and static/app.js comparisonStrip)."""
+
+    def test_every_relationship_carries_the_field(self, client):
+        rels = client.get("/api/relationships").json()
+        assert rels, "expected at least one relationship in the dev database this suite runs against"
+        assert all("normalized_comparison" in r for r in rels)
+
+    def test_a_comparable_entry_has_the_expected_shape(self, client):
+        rels = client.get("/api/relationships").json()
+        comparable = [r["normalized_comparison"] for r in rels
+                      if r["normalized_comparison"] and r["normalized_comparison"]["comparable"]]
+        assert comparable, "expected at least one comparable pair to exercise the shape"
+        c = comparable[0]
+        assert isinstance(c["diff_pct"], (int, float))
+        assert isinstance(c["value_a"], (int, float)) and isinstance(c["value_b"], (int, float))
+        assert isinstance(c["common_unit"], str)
+        assert isinstance(c["magnitude_suspect"], bool)
+
+    def test_a_magnitude_suspect_pair_is_not_reported_as_agreeing(self, client):
+        """The exact regression from the user report: same digits, unit
+        recorded at two different scales -- must never be shown as a clean
+        agreement, since that reads as a real corroboration."""
+        rels = client.get("/api/relationships").json()
+        suspects = [r["normalized_comparison"] for r in rels
+                    if r["normalized_comparison"] and r["normalized_comparison"]["magnitude_suspect"]]
+        for c in suspects:
+            assert c["agree"] is not True
+
+    def test_a_pair_missing_a_numeric_value_is_not_comparable(self, client):
+        """compare_values() still runs and returns a result even when one
+        side has no number -- it just reports comparable=False rather than
+        the whole field going missing, so the UI can distinguish "checked,
+        not comparable" from "never checked" (e.g. a fact lookup failure)."""
+        facts = {f["id"]: f for f in client.get("/api/facts").json()}
+        rels = client.get("/api/relationships").json()
+        for r in rels:
+            fa, fb = facts.get(r["fact_id_a"]), facts.get(r["fact_id_b"])
+            if not fa or not fb:
+                assert r["normalized_comparison"] is None
+            elif fa.get("value_numeric") is None or fb.get("value_numeric") is None:
+                assert r["normalized_comparison"]["comparable"] is False
+
+
 class TestQueryValidation:
     def test_an_unrecognised_relation_type_is_rejected(self, client):
         """Previously a typo silently returned an empty list, which reads
