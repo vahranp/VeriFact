@@ -31,6 +31,9 @@ from app.candidates import score_pair
 from app.embeddings import top_k_similar
 from app.llm_client import chat_json, LLMError, LLMParseError
 from app.normalize import compare_values, format_comparison_for_prompt
+from app.schemas import MetricMatch, RelationJudgment
+
+from pydantic import ValidationError
 
 # How many nearest neighbours the hybrid signals get to look at.
 #
@@ -146,6 +149,30 @@ Respond with ONLY this JSON object:
 }"""
 
 
+def _validated(model, raw, default: dict) -> dict:
+    """Puts a model response through its schema before anything else sees it.
+
+    These schemas existed but were only applied to fact extraction, so the
+    relationship path -- which writes straight to the database -- was the
+    one place taking raw model output on trust. That is the opposite of the
+    right way round: a bad fact is one bad row, a bad relationship is an
+    assertion about two other rows.
+
+    A response that can't be validated is downgraded to a safe default
+    rather than raising, because a single unparseable judgment should cost
+    one relationship, not the whole document's comparison pass. The default
+    asserts nothing: step 1 falls back to "not the same metric" and step 2
+    to "uncertain", so a malformed response can never manufacture a
+    corroboration or a contradiction.
+    """
+    if not isinstance(raw, dict):
+        return dict(default)
+    try:
+        return model.model_validate(raw).model_dump()
+    except ValidationError:
+        return dict(default)
+
+
 def _fact_block(label: str, fact: dict, document_name: str) -> str:
     return (
         f"{label}:\n"
@@ -171,8 +198,10 @@ def classify_metric_match(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_nam
         return cached, True
 
     user_prompt = _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" + _fact_block("FACT B", fact_b, doc_b_name)
-    result = chat_json(REASONING_MODEL, SYSTEM_PROMPT_METRIC, user_prompt, temperature=0.0,
-                        max_tokens=250, timeout=REASONING_TIMEOUT_SECONDS)
+    raw = chat_json(REASONING_MODEL, SYSTEM_PROMPT_METRIC, user_prompt, temperature=0.0,
+                     max_tokens=250, timeout=REASONING_TIMEOUT_SECONDS)
+    result = _validated(MetricMatch, raw, default={"same_metric": False,
+                                                    "reason": "step 1 returned an unusable shape"})
     db.set_cached_relationship(pair_hash, REASONING_MODEL, result)
     return result, False
 
@@ -196,8 +225,13 @@ def classify_relation(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: s
         _fact_block("FACT B", fact_b, doc_b_name) + "\n\n" +
         comparison_line
     )
-    result = chat_json(REASONING_MODEL, SYSTEM_PROMPT_JUDGE, user_prompt, temperature=0.0,
-                        max_tokens=400, timeout=REASONING_TIMEOUT_SECONDS)
+    raw = chat_json(REASONING_MODEL, SYSTEM_PROMPT_JUDGE, user_prompt, temperature=0.0,
+                     max_tokens=400, timeout=REASONING_TIMEOUT_SECONDS)
+    result = _validated(RelationJudgment, raw, default={
+        "relation_type": "uncertain",
+        "explanation": "step 2 returned an unusable shape; no relationship is asserted",
+        "reconciliation_context": None, "confidence": None,
+    })
     db.set_cached_relationship(pair_hash, REASONING_MODEL, result)
     return result, False
 

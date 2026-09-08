@@ -248,3 +248,73 @@ class TestCanonicalPairOrdering:
         forward = R.classify_pair(low, "d", high, "d")[0]["_meta"]["swapped"]
         reverse = R.classify_pair(high, "d", low, "d")[0]["_meta"]["swapped"]
         assert forward != reverse, "exactly one presentation order must be swapped"
+
+
+def _f(statement):
+    return {"statement": statement, "page_number": 1, "quote": "q",
+            "subject": "X", "attribute": "revenue"}
+
+
+class TestModelOutputIsValidated:
+    """The schemas in app/schemas.py were written for exactly this and were
+    only ever applied to fact extraction, leaving the relationship path --
+    which writes assertions about two other rows -- taking raw model output
+    on trust. A bad fact is one bad row; a bad relationship is a claim about
+    two of them."""
+
+    def test_unrecognised_relation_type_becomes_uncertain_not_a_real_type(self, no_cache, monkeypatch):
+        """The system is allowed to not know. What it must never do is
+        coerce an unrecognised label into a real relationship."""
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "sort_of_agrees",
+            "explanation": "x", "confidence": 0.9,
+        })
+        result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
+        assert result["relation_type"] == "uncertain"
+
+    def test_known_alias_is_normalised(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "CONTRADICTION",
+            "explanation": "x", "confidence": 0.9,
+        })
+        assert R.classify_pair(_f("a"), "d", _f("b"), "d")[0]["relation_type"] == "contradicts"
+
+    def test_out_of_range_confidence_is_clamped(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "corroborates",
+            "explanation": "x", "confidence": 7.5,
+        })
+        assert R.classify_pair(_f("a"), "d", _f("b"), "d")[0]["confidence"] == 1.0
+
+    def test_a_list_response_cannot_crash_the_pair(self, no_cache, monkeypatch):
+        """A malformed response that recovers to a list used to reach
+        result.get(...) and raise AttributeError. It must degrade to a
+        safe default instead."""
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: [1, 2, 3])
+        result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
+        assert result["relation_type"] == "unrelated"
+
+    def test_a_malformed_response_never_manufactures_a_relationship(self, no_cache, monkeypatch):
+        """The fallback must assert nothing -- a broken judgment should
+        cost one relationship, not invent one."""
+        import app.relationships as R
+        for junk in ({}, {"nonsense": True}, {"same_metric": "maybe"}):
+            monkeypatch.setattr(R, "chat_json", lambda *a, **k: junk)
+            result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
+            assert result["relation_type"] not in ("corroborates", "contradicts", "reconciled")
+
+    def test_step2_garbage_yields_uncertain_not_a_stored_relation(self, no_cache, monkeypatch):
+        import app.relationships as R
+        calls = {"n": 0}
+
+        def fake(*a, **k):
+            calls["n"] += 1
+            return {"same_metric": True} if calls["n"] == 1 else {"junk": "yes"}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
+        assert result["relation_type"] == "uncertain"
