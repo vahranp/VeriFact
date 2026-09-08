@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import fitz  # PyMuPDF
 
 from app.config import MAX_CHUNK_CHARS, CHUNK_OVERLAP_CHARS, MIN_PAGE_CHARS
+from app.tables import layout_aware_text
 
 
 @dataclass
@@ -38,16 +39,27 @@ PAGE_CONTEXT_CHARS = 260
 
 
 def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
-    """Returns [(page_number, raw_text), ...] for every non-trivial page."""
+    """Returns [(page_number, text), ...] for every non-trivial page.
+
+    Table-like pages are reconstructed from word coordinates rather than
+    taken in reading order (see app/tables.py): flattening a grid into a
+    vertical token stream destroys the link between a row label and its
+    values, which was the direct cause of facts whose quote was a row
+    label while the value came from a cell elsewhere. Pages that don't
+    look tabular are returned unchanged.
+    """
     doc = fitz.open(pdf_path)
-    pages = []
-    for i in range(len(doc)):
-        page = doc.load_page(i)
-        text = page.get_text("text").strip()
-        if len(text) >= MIN_PAGE_CHARS:
-            pages.append((i + 1, text))
-    doc.close()
-    return pages
+    try:
+        pages = []
+        for i in range(len(doc)):
+            page = doc.load_page(i)
+            text, _used_layout = layout_aware_text(page)
+            text = text.strip()
+            if len(text) >= MIN_PAGE_CHARS:
+                pages.append((i + 1, text))
+        return pages
+    finally:
+        doc.close()
 
 
 def _page_context(text: str) -> str:
@@ -169,6 +181,7 @@ def _page_int(token: str, context: str) -> int:
 
 def page_count(pdf_path: str) -> int:
     doc = fitz.open(pdf_path)
-    n = len(doc)
-    doc.close()
-    return n
+    try:
+        return len(doc)
+    finally:
+        doc.close()
