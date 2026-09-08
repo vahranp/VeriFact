@@ -517,5 +517,6 @@ The check also keeps catching real errors in the improved run: one fact claims `
 quoting a row containing `35.69% | 45.15% | 36.36%`. The model picked the wrong cell, and that
 fact is correctly reported as quote-grounded but not validated rather than passing silently.
 
-**Corpus-wide after both changes:** 44.3% fact_validated, 36.0% quote-grounded only, 19.6%
-ungrounded. The middle band is the one that used to be invisible.
+**Corpus-wide after both changes:** 49.3% fact_validated, 33.0% quote-grounded only, 17.7%
+ungrounded across 373 facts — up from 44.3% validated as more pages are re-ingested with
+table reconstruction. The middle band is the one that used to be invisible.

@@ -135,8 +135,10 @@ The first isn't hallucination — the quote is genuinely on the page. It's a row
 number came from a cell the PDF flattening separated from it. The second is circular: a quote that
 restates the value evidences nothing.
 
-Corpus-wide this is 44.3% fact_validated, 36.0% quote-grounded only, 19.6% ungrounded. The middle
-band used to be invisible and showed a green tick.
+Corpus-wide at the time of writing: 49.3% fact_validated, 33.0% quote-grounded only, 17.7%
+ungrounded (373 facts). The validated share rises as pages are re-ingested with table
+reconstruction — it was 44.3% before that landed. The middle band used to be invisible and
+showed a green tick.
 
 Only the value can downgrade a fact. Unit, subject and period are reported but never used to
 reject, because all three are routinely stated once in a table header rather than in the quoted
@@ -326,7 +328,7 @@ below 9.5 carries the reason.
 | Table extraction | 8 | 12% → 85% evidence validation on a table page. Recovers rows, cells and gutters; does not model header semantics or spanning cells. |
 | Performance | 8.5 | Profiled before optimizing, 20–30 min → ~4 min on a representative page, three changes measured and rejected. Dense pages remain slow on local inference. |
 | Caching | 9.5 | Three content-keyed layers; prompt and pipeline changes invalidate automatically, verified by the failure that prompted the fingerprint. |
-| Testing | 9 | 364 tests, LLM mocked, no Ollama needed, fresh clone passes. Missing: fixture-based end-to-end tests of the four cases without a live model. |
+| Testing | 9 | 368 tests, LLM mocked, no Ollama needed, fresh clone passes. Missing: fixture-based end-to-end tests of the four cases without a live model. |
 | API | 9 | Typed responses, constrained queries, validation before side effects, no stack traces. Response models are permissive by design. |
 | UI | 9 | Evidence, values, period, grounding status and retrieval provenance all visible per relationship. Not a designer's work, but it communicates the chain. |
 | Documentation | 9.5 | README matches the implementation, PERFORMANCE carries the numbers including the failures. |
