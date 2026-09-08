@@ -482,3 +482,40 @@ deduced rather than searched for.
 Deductions resting on an edge that a violating triangle implicated are discarded (183 → 126).
 Propagating a judgment already known to be broken would turn one error into several, which is
 worse than the missing edge it fills.
+
+---
+
+## Table reconstruction: the largest correctness gain measured
+
+Page 52 of the starter annual report is a table page. Re-ingesting it with layout reconstruction
+(`app/tables.py`) rather than PyMuPDF's reading-order text, and scoring both runs with the
+evidence check (`app/evidence.py`):
+
+| page 52 | facts | evidence-validated |
+|---|---:|---:|
+| before — flattened reading-order text | 17 | **2 (12%)** |
+| after — rows reconstructed from word coordinates | 13 | **11 (85%)** |
+
+Fewer facts, and that is the point: the flattened run was producing facts it could not evidence.
+
+What changed is visible in the quotes themselves:
+
+```
+before   turnover rate = 42.02%     quote: "42.02%"
+after    turnover rate = 42.02%     quote: "41.93% | 43.26% | 42.02%"
+
+before   subsidiary status = Subsidiary
+         quote: "Subsidiary"
+after    subsidiary status = Yes
+         quote: "1. | Spoton Logistics Private Limited | Subsidiary | 100.00%"
+```
+
+Before, the "evidence" for a number was the number — circular, and it proves nothing. After, the
+quote carries the row label and the entity alongside the value, which is what makes it evidence.
+
+The check also keeps catching real errors in the improved run: one fact claims `33.24%` while
+quoting a row containing `35.69% | 45.15% | 36.36%`. The model picked the wrong cell, and that
+fact is correctly reported as quote-grounded but not validated rather than passing silently.
+
+**Corpus-wide after both changes:** 44.3% fact_validated, 36.0% quote-grounded only, 19.6%
+ungrounded. The middle band is the one that used to be invisible.
