@@ -66,6 +66,20 @@ HYBRID_SCAN_K = SIMILARITY_TOP_K
 # falls back to embedding-only top-K.
 HYBRID_MAX_POOL = 4000
 
+# Relation types worth persisting.
+#
+# "uncertain" is stored deliberately. A system that can only answer
+# corroborates / contradicts / reconciled has to force every judged pair
+# into one of them, and the failure that produces is silent: a pair the
+# evidence genuinely does not settle gets a confident label instead of an
+# admission. Storing it means the UI can show "judged, not settled", which
+# is a real answer and the honest one for a knowledge layer.
+#
+# "unrelated" stays unstored -- it is the overwhelming majority of
+# candidate pairs and asserts nothing, so persisting it would bloat the
+# graph with non-findings.
+STORED_RELATIONS = ("corroborates", "contradicts", "reconciled", "uncertain")
+
 # ---------------------------------------------------------------- step 1 --
 
 SYSTEM_PROMPT_METRIC = """You are given two facts extracted from documents. Decide ONLY whether they \
@@ -149,10 +163,15 @@ vs. consolidated, before vs. after an acquisition), or definition explains the g
 name the specific reconciling context.
 - "unrelated": on reflection the two facts don't actually support a comparison after all (e.g. \
 no numeric comparison was possible and the statements are too different to judge qualitatively).
+- "uncertain": the facts do describe the same metric, but the evidence in front of you does not \
+settle how they relate -- for example the values differ while the period or scope determination \
+came back UNKNOWN, so you cannot tell whether context explains the gap. Choose this instead of \
+guessing between "contradicts" and "reconciled". Reporting that the evidence is insufficient is a \
+correct answer here, and is strongly preferred over a confident label the evidence does not support.
 
 Respond with ONLY this JSON object:
 {
-  "relation_type": "corroborates" | "contradicts" | "reconciled" | "unrelated",
+  "relation_type": "corroborates" | "contradicts" | "reconciled" | "unrelated" | "uncertain",
   "explanation": "<1-3 sentences citing the specific values, the normalized comparison, or the reconciling context>",
   "reconciliation_context": "<required if reconciled, else null>",
   "confidence": <0.0-1.0>
@@ -399,6 +418,7 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
         "candidates_checked": len(jobs), "stored": 0, "skipped_unrelated": 0, "errors": 0,
         "llm_calls": 0, "cache_hits": 0,
         "metric_mismatches": 0,  # step 1 said "no" -- resolved without ever reaching step 2
+        "uncertain": 0,          # judged, but the evidence did not settle it
         # Pairs no embedding threshold would have surfaced, promoted by an
         # entity/lexical/numeric signal instead (see app/candidates.py).
         "hybrid_promotions": hybrid_promotions,
@@ -450,9 +470,14 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             summary["metric_mismatches"] += 1
 
         relation = result.get("relation_type")
-        if relation not in ("corroborates", "contradicts", "reconciled"):
+        if relation not in STORED_RELATIONS:
+            # "unrelated" is the overwhelming majority of candidate pairs
+            # and carries no claim, so it stays unstored -- persisting it
+            # would bloat the graph with non-findings.
             summary["skipped_unrelated"] += 1
             continue
+        if relation == "uncertain":
+            summary["uncertain"] += 1
 
         # Persist in the same order the explanation talks about, so the
         # UI's left-hand fact is the one the text calls "FACT A".

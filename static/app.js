@@ -1,6 +1,6 @@
 const API = "";
 
-const C = { corroborates: "#059669", contradicts: "#dc2626", reconciled: "#d97706", brand: "#4f46e5" };
+const C = { corroborates: "#059669", contradicts: "#dc2626", reconciled: "#d97706", uncertain: "#64748b", brand: "#4f46e5" };
 const DOC_COLORS = ["#4f46e5", "#0284c7", "#059669", "#d97706", "#db2777", "#7c3aed", "#0891b2", "#65a30d", "#e11d48", "#0d9488"];
 
 const I = {
@@ -574,7 +574,7 @@ $("graphDocFilter").addEventListener("change", renderGraph);
 
 // ---------------- relationships ----------------
 
-const RI = { corroborates: I.check, contradicts: I.x, reconciled: I.link };
+const RI = { corroborates: I.check, contradicts: I.x, reconciled: I.link, uncertain: I.alert };
 
 function delta(a, b) {
   const x = a.value_numeric, y = b.value_numeric;

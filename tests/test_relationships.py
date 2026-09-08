@@ -318,3 +318,62 @@ class TestModelOutputIsValidated:
         monkeypatch.setattr(R, "chat_json", fake)
         result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
         assert result["relation_type"] == "uncertain"
+
+
+class TestUncertaintyIsExpressible:
+    """A system that can only answer corroborates / contradicts /
+    reconciled must force every judged pair into one of them, and the
+    resulting failure is silent: a pair the evidence does not settle gets
+    a confident label instead of an admission."""
+
+    def test_uncertain_is_a_stored_relation(self):
+        from app.relationships import STORED_RELATIONS
+        assert "uncertain" in STORED_RELATIONS
+
+    def test_unrelated_is_still_not_stored(self):
+        """It asserts nothing and is the majority of candidate pairs."""
+        from app.relationships import STORED_RELATIONS
+        assert "unrelated" not in STORED_RELATIONS
+
+    def test_the_judge_prompt_offers_uncertain(self):
+        from app.relationships import SYSTEM_PROMPT_JUDGE
+        assert '"uncertain"' in SYSTEM_PROMPT_JUDGE
+        assert "insufficient" in SYSTEM_PROMPT_JUDGE.lower()
+
+    def test_classify_pair_can_return_uncertain(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "uncertain",
+            "explanation": "period unknown, cannot tell", "confidence": 0.3,
+        })
+        result, _ = R.classify_pair(_f("a"), "d", _f("b"), "d")
+        assert result["relation_type"] == "uncertain"
+
+
+class TestContextReachesTheJudge:
+    def test_period_and_scope_determinations_are_in_the_prompt(self, no_cache, monkeypatch):
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "reconciled",
+                    "explanation": "x", "confidence": 0.9}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        a = dict(_f("a"), time_period="FY24", scope="consolidated")
+        b = dict(_f("b"), time_period="FY23", scope="consolidated")
+        R.classify_pair(a, "d", b, "d")
+        assert "Reporting period: DIFFERENT" in seen["user"]
+        assert "Scope: SAME" in seen["user"]
+
+    def test_meta_reports_the_context_determinations(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "corroborates",
+            "explanation": "x", "confidence": 0.9,
+        })
+        a = dict(_f("a"), time_period="FY24")
+        b = dict(_f("b"), time_period="FY2023-24")
+        result, _ = R.classify_pair(a, "d", b, "d")
+        assert result["_meta"]["period"] == "same"
