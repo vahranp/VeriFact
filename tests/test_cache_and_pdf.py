@@ -139,3 +139,44 @@ class TestPageSpecValidation:
     def test_ranges_are_inclusive_of_both_ends(self):
         from app.pdf_extract import parse_page_spec
         assert parse_page_spec("7-10") == {7, 8, 9, 10}
+
+
+class TestPipelineFingerprintInvalidation:
+    """Document-level dedup short-circuits a byte-identical re-upload,
+    skipping ingestion entirely. That is only correct while the pipeline
+    would produce the same result -- and that assumption broke for real:
+    after PDF text extraction changed to reconstruct table pages, a
+    re-upload returned the OLD facts because the bytes hadn't changed.
+    """
+
+    def test_fingerprint_is_stable_across_calls(self):
+        from app.config import pipeline_fingerprint
+        assert pipeline_fingerprint() == pipeline_fingerprint()
+
+    def test_extraction_model_change_changes_the_fingerprint(self, monkeypatch):
+        from app import config
+        before = config.pipeline_fingerprint()
+        monkeypatch.setattr(config, "EXTRACTION_MODEL", "some-other-model")
+        assert config.pipeline_fingerprint() != before
+
+    def test_chunk_size_change_changes_the_fingerprint(self, monkeypatch):
+        from app import config
+        before = config.pipeline_fingerprint()
+        monkeypatch.setattr(config, "MAX_CHUNK_CHARS", config.MAX_CHUNK_CHARS + 1)
+        assert config.pipeline_fingerprint() != before
+
+    def test_pipeline_version_bump_changes_the_fingerprint(self, monkeypatch):
+        from app import config
+        before = config.pipeline_fingerprint()
+        monkeypatch.setattr(config, "PIPELINE_VERSION", "999")
+        assert config.pipeline_fingerprint() != before
+
+    def test_unrelated_config_does_not_change_the_fingerprint(self, monkeypatch):
+        """A timeout or concurrency edit must not force re-ingestion of
+        every document -- those don't change what gets extracted."""
+        from app import config
+        before = config.pipeline_fingerprint()
+        monkeypatch.setattr(config, "REASONING_TIMEOUT_SECONDS", 999)
+        monkeypatch.setattr(config, "LLM_CONCURRENCY", 8)
+        monkeypatch.setattr(config, "SIMILARITY_THRESHOLD", 0.99)
+        assert config.pipeline_fingerprint() == before

@@ -137,17 +137,23 @@ def init_db():
         # app/evidence.py for why the second is a separate question.
         _ensure_column(conn, "facts", "evidence_status", "TEXT")
         _ensure_column(conn, "facts", "evidence_detail", "TEXT")
+        # Which extraction behaviour produced this document -- reuse of a
+        # byte-identical upload is only valid while it still matches.
+        _ensure_column(conn, "documents", "pipeline_fingerprint", "TEXT")
 
 
 # ---------------- documents ----------------
 
 def insert_document(original_name: str, stored_path: str, content_hash: Optional[str] = None,
                      page_selector: Optional[str] = None) -> int:
+    from app.config import pipeline_fingerprint
+
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO documents (original_name, stored_path, status, uploaded_at, content_hash, page_selector) "
-            "VALUES (?, ?, 'pending', ?, ?, ?)",
-            (original_name, stored_path, time.time(), content_hash, page_selector),
+            "INSERT INTO documents (original_name, stored_path, status, uploaded_at, content_hash, "
+            "page_selector, pipeline_fingerprint) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+            (original_name, stored_path, time.time(), content_hash, page_selector,
+             pipeline_fingerprint()),
         )
         return cur.lastrowid
 
@@ -181,13 +187,25 @@ def find_done_document_by_hash(content_hash: str, page_selector: Optional[str]) 
     Requires at least one fact to exist for that document: a "done" run
     that extracted zero facts (e.g. every chunk timed out) is not a
     success worth reusing -- a retry should get a real second attempt, not
-    be pointed back at the same all-failure result forever."""
+    be pointed back at the same all-failure result forever.
+
+    Also requires the pipeline fingerprint to match. Identical bytes are
+    only safe to reuse while the pipeline would still extract the same
+    thing from them, and that assumption broke for real: after PDF text
+    extraction changed to reconstruct table pages from word coordinates,
+    re-uploading a page to test the improvement returned the OLD facts,
+    because the file's bytes hadn't changed. The chunk-level cache handled
+    it correctly; this short-circuit ran first and never gave it the
+    chance. See config.pipeline_fingerprint."""
+    from app.config import pipeline_fingerprint
+
     with get_conn() as conn:
         row = conn.execute(
             "SELECT d.* FROM documents d WHERE d.content_hash = ? AND d.status = 'done' "
-            "AND d.page_selector IS ? AND EXISTS (SELECT 1 FROM facts f WHERE f.document_id = d.id) "
+            "AND d.page_selector IS ? AND d.pipeline_fingerprint = ? "
+            "AND EXISTS (SELECT 1 FROM facts f WHERE f.document_id = d.id) "
             "ORDER BY d.id DESC LIMIT 1",
-            (content_hash, page_selector),
+            (content_hash, page_selector, pipeline_fingerprint()),
         ).fetchone()
         return dict(row) if row else None
 

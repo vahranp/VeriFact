@@ -128,3 +128,40 @@ REASONING_TIMEOUT_SECONDS = float(os.getenv("REASONING_TIMEOUT_SECONDS", "60"))
 # with enough spare capacity that dense chunks aren't already near the
 # timeout ceiling.
 LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "1"))
+
+
+# --- Pipeline fingerprint -------------------------------------------------
+#
+# Document-level dedup (see db.find_done_document_by_hash) short-circuits a
+# re-upload of byte-identical content, skipping ingestion entirely. That is
+# correct only while the pipeline would produce the same result.
+#
+# It bit for real: after PDF text extraction changed to reconstruct table
+# pages from word coordinates, re-uploading a page to test the improvement
+# returned the OLD document's facts, because the file's bytes hadn't
+# changed. The chunk-level extraction cache handled it correctly (chunk
+# text changed, so the hash changed), but document-level reuse happens
+# before chunking and never got the chance.
+#
+# So reuse now requires the pipeline fingerprint to match too. Bump
+# PIPELINE_VERSION whenever a change alters what the pipeline would extract
+# from the same bytes -- PDF text extraction, chunking, or the grounding
+# and evidence rules. Model and prompt changes are covered automatically
+# because they are folded into the fingerprint below.
+PIPELINE_VERSION = "2"
+
+
+def pipeline_fingerprint() -> str:
+    """Identifies the extraction behaviour a stored document was produced
+    by. Deliberately excludes anything that doesn't change extraction
+    output (timeouts, concurrency, similarity thresholds) so unrelated
+    config edits don't force needless re-ingestion."""
+    from app.cache import hash_text
+
+    return hash_text(
+        PIPELINE_VERSION,
+        EXTRACTION_MODEL,
+        str(MAX_CHUNK_CHARS),
+        str(CHUNK_OVERLAP_CHARS),
+        str(MIN_PAGE_CHARS),
+    )[:16]
