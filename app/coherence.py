@@ -56,6 +56,13 @@ EQUALITY = {"corroborates"}
 # just one with a stated reason (a period, scope or unit gap).
 INEQUALITY = {"contradicts", "reconciled"}
 
+# Evidence statuses (see app/evidence.py) that disqualify a fact's value
+# from being used to adjudicate blame. A fact missing evidence_status
+# entirely (not one of these three known values) is treated as usable --
+# "not yet assessed", not "known bad" -- matching the identical policy in
+# app/arithmetic.py.
+_UNVERIFIED = {"ungrounded", "quote_grounded"}
+
 
 @dataclass
 class Violation:
@@ -148,11 +155,20 @@ def _numeric_disagrees_with_label(edge: dict, facts_by_id: Optional[dict]) -> bo
     arbiter, because it doesn't have an opinion: if an edge claims two facts
     corroborate while their normalized values differ, that edge is wrong
     regardless of how sure the model sounded.
+
+    That arbiter is only trustworthy if the values it's comparing are
+    themselves evidenced. A fact whose quote is ungrounded, or circular
+    (just restates the value), has no more claim to being "ground truth"
+    than the model's own labels do -- using it to convict an edge would
+    swap one unverified opinion for another instead of actually settling
+    anything. Audited in alongside the identical gap in app/arithmetic.py.
     """
     if not facts_by_id:
         return False
     fa, fb = facts_by_id.get(edge.get("fact_id_a")), facts_by_id.get(edge.get("fact_id_b"))
     if not fa or not fb:
+        return False
+    if fa.get("evidence_status") in _UNVERIFIED or fb.get("evidence_status") in _UNVERIFIED:
         return False
 
     cmp = compare_values(

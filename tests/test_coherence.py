@@ -17,8 +17,8 @@ def _rel(rel_id, a, b, relation, confidence=0.9):
             "relation_type": relation, "confidence": confidence}
 
 
-def _fact(fact_id, value, unit="INR million"):
-    return {"id": fact_id, "value_numeric": value, "unit": unit}
+def _fact(fact_id, value, unit="INR million", evidence_status=None):
+    return {"id": fact_id, "value_numeric": value, "unit": unit, "evidence_status": evidence_status}
 
 
 class TestImpossibleTriangles:
@@ -257,3 +257,72 @@ class TestUndeterminedBlame:
         violation = check_coherence(rels, facts_by_id=facts).violations[0]
         assert violation.suspect["id"] == 1
         assert "deterministic comparison" in violation.reason
+
+
+class TestBlameRequiresEvidencedFacts:
+    """Audited in alongside the identical gap in app/arithmetic.py: this
+    module's numeric arbiter is only trustworthy if the values it compares
+    are themselves evidenced. An ungrounded or circular-quote fact has no
+    more claim to "ground truth" than the model's own labels do -- using
+    it to convict an edge would swap one unverified opinion for another.
+    """
+
+    def test_an_ungrounded_fact_falls_back_to_confidence(self):
+        rels = [
+            _rel(1, 10, 30, "corroborates", confidence=1.0),
+            _rel(2, 10, 20, "corroborates", confidence=0.9),
+            _rel(3, 20, 30, "reconciled", confidence=0.8),
+        ]
+        facts = {
+            10: _fact(10, 81415.38, evidence_status="ungrounded"),
+            20: _fact(20, 81415.38),
+            30: _fact(30, 72253.01),
+        }
+        violation = check_coherence(rels, facts_by_id=facts).violations[0]
+        # Without the numeric arbiter available, blame falls back to the
+        # least confident edge (relationship 3) rather than confidently
+        # accusing edge 1 using a value nothing verified.
+        assert violation.suspect["id"] == 3
+        assert "least confident" in violation.reason
+
+    def test_a_circular_quote_fact_also_disqualifies_the_arbiter(self):
+        rels = [
+            _rel(1, 10, 30, "corroborates", confidence=1.0),
+            _rel(2, 10, 20, "corroborates", confidence=0.9),
+            _rel(3, 20, 30, "reconciled", confidence=0.8),
+        ]
+        facts = {
+            10: _fact(10, 81415.38, evidence_status="quote_grounded"),
+            20: _fact(20, 81415.38),
+            30: _fact(30, 72253.01),
+        }
+        violation = check_coherence(rels, facts_by_id=facts).violations[0]
+        assert violation.suspect["id"] == 3
+        assert "least confident" in violation.reason
+
+    def test_fact_validated_facts_still_use_the_numeric_arbiter(self):
+        rels = [
+            _rel(1, 10, 30, "corroborates", confidence=1.0),
+            _rel(2, 10, 20, "corroborates", confidence=0.9),
+            _rel(3, 20, 30, "reconciled", confidence=0.8),
+        ]
+        facts = {
+            10: _fact(10, 81415.38, evidence_status="fact_validated"),
+            20: _fact(20, 81415.38, evidence_status="fact_validated"),
+            30: _fact(30, 72253.01, evidence_status="fact_validated"),
+        }
+        violation = check_coherence(rels, facts_by_id=facts).violations[0]
+        assert violation.suspect["id"] == 1
+        assert "deterministic comparison" in violation.reason
+
+    def test_missing_evidence_status_still_uses_the_numeric_arbiter(self):
+        """No evidence_status field at all is "not yet assessed", not
+        "known bad" -- matching every existing test fixture in this file."""
+        rels = [
+            _rel(1, 10, 30, "corroborates", confidence=1.0),
+            _rel(2, 10, 20, "corroborates", confidence=0.9),
+            _rel(3, 20, 30, "reconciled", confidence=0.8),
+        ]
+        facts = {10: _fact(10, 81415.38), 20: _fact(20, 81415.38), 30: _fact(30, 72253.01)}
+        violation = check_coherence(rels, facts_by_id=facts).violations[0]
+        assert violation.suspect["id"] == 1
