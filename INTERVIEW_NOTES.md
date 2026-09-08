@@ -302,3 +302,54 @@ isn't one, saying anything about explaining it is worse than saying nothing.
 
 That third one is the most useful. The regression was in a prompt, introduced by an improvement,
 and invisible to a test suite that mocks the LLM.
+
+---
+
+## Honest self-assessment
+
+Scored as I'd score someone else's submission, after the final hardening pass. Every category
+below 9.5 carries the reason.
+
+| Category | Score | Remaining weakness |
+|---|:--:|---|
+| Assignment compliance | 9.5 | All required capabilities implemented and demonstrable through the running system. |
+| Fact extraction | 8.5 | Open-vocabulary schema, structured output validated, per-chunk failures isolated. Still misreads which cell a value belongs to on dense tables — caught by the evidence check rather than prevented. |
+| Evidence grounding | 9.5 | Two independent verdicts, verified in code, never by asking the model about itself. Subject/period support is computed but only advisory. |
+| Numeric normalization | 9.5 | Deterministic, refuses rather than guesses, preserves the original representation, 100× guard against unit-artefact contradictions. |
+| Semantic equivalence | 8.5 | Slice-first gating removed 142 false positives with 0 legitimate relabels. No alias dictionary. Still one 8B judgment with no second opinion. |
+| Candidate retrieval | 9 | Not exhaustive, not a single brittle threshold, records why each pair was selected. The extra signals were measured as near-redundant and kept only for explainability. |
+| Corroboration | 9.5 | Case 1 verified live: ₹81,415.38M ≡ ₹8,142 Cr at 0.006%, from generic normalization. |
+| Contradiction | 8 | Genuine unexplained conflicts are found and surfaced. The canonical Case 2 pair currently resolves to `uncertain` — correctly, given a stale unit — pending the re-ingest. |
+| Contextual reconciliation | 9 | Period and scope computed in code, with `overlapping` as its own answer. Relative periods stay UNKNOWN because the document's reporting date isn't extracted. |
+| Failure handling | 9 | Per-chunk isolation, orphaned-job recovery, safe defaults on malformed output, everything recorded as a visible issue. |
+| Generalization | 8.5 | Audited clean of starter-specific logic; mechanisms are structural, with non-financial tests. Still not run end-to-end on a genuinely different corpus. |
+| Table extraction | 8 | 12% → 85% evidence validation on a table page. Recovers rows, cells and gutters; does not model header semantics or spanning cells. |
+| Performance | 8.5 | Profiled before optimizing, 20–30 min → ~4 min on a representative page, three changes measured and rejected. Dense pages remain slow on local inference. |
+| Caching | 9.5 | Three content-keyed layers; prompt and pipeline changes invalidate automatically, verified by the failure that prompted the fingerprint. |
+| Testing | 9 | 364 tests, LLM mocked, no Ollama needed, fresh clone passes. Missing: fixture-based end-to-end tests of the four cases without a live model. |
+| API | 9 | Typed responses, constrained queries, validation before side effects, no stack traces. Response models are permissive by design. |
+| UI | 9 | Evidence, values, period, grounding status and retrieval provenance all visible per relationship. Not a designer's work, but it communicates the chain. |
+| Documentation | 9.5 | README matches the implementation, PERFORMANCE carries the numbers including the failures. |
+| Explainability | 9.5 | Every relationship exposes why the pair was retrieved, what was computed, and what the model concluded. |
+| Code quality | 9 | Small modules with a clear boundary between LLM and deterministic work. `app/main.py` is getting long. |
+| **Overall** | **9** | Strong architecture, measured decisions, honest reporting. Held back by unlabelled precision and an 8B ceiling. |
+
+### Remaining issues
+
+**BLOCKER** — none.
+
+**HIGH** — none outstanding.
+
+**MEDIUM**
+- Precision is measured by self-consistency, not human labels. ~40 hand-labelled relationships
+  would convert the coherence proofs into a real number.
+- Table extraction recovers structure but not header semantics, so a value's column meaning still
+  depends on the model reading the aligned header row correctly.
+- Relative periods ("previous year") cannot resolve because each document's own reporting date
+  isn't extracted.
+
+**LOW**
+- Coherence violations are reported, not repaired. The mechanism identifies the wrong edge using
+  arithmetic; I stopped short of auto-rewriting judgments deliberately.
+- `app/main.py` mixes routing and response shaping and would benefit from splitting.
+- No authentication or multi-tenancy — correct for a local prototype, not for shipping.

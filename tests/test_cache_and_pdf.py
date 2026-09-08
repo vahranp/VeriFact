@@ -185,16 +185,20 @@ class TestPipelineFingerprintInvalidation:
 class TestOrphanedJobRecovery:
     """Ingestion runs as a BackgroundTask inside the server process, so a
     restart abandons whatever was in flight. Those rows used to sit at
-    "processing" forever, showing a progress bar that would never move."""
+    "processing" forever, showing a progress bar that would never move.
 
-    def test_the_sweep_runs_only_once_per_process(self):
-        """init_db() is also called from tests; sweeping on a later call
-        would kill a job that is genuinely running -- exactly the failure
-        it exists to clean up after."""
+    The first version of this fix called the sweep from db.init_db() with a
+    once-per-process guard, and that was not enough -- it bit within
+    minutes. A separate python process querying the database calls
+    init_db(), gets fresh module state, and swept: it marked a document the
+    running server was actively extracting as failed. A per-process guard
+    cannot see other processes, so only the server may sweep.
+    """
+
+    def test_init_db_does_not_sweep(self):
+        """The property that actually broke: importing the db module and
+        initialising it must never touch running work."""
         from app import db
-        assert db._ORPHAN_SWEEP_DONE is True, "init_db should have swept at import time"
-
-        # A second call must be a no-op even with an in-flight document.
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
@@ -202,7 +206,42 @@ class TestOrphanedJobRecovery:
             )
             live_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
         try:
-            db._fail_orphaned_jobs()
+            db.init_db()
+            assert db.get_document(live_id)["status"] == "processing"
+        finally:
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM documents WHERE id = ?", (live_id,))
+
+    def test_the_server_sweep_marks_interrupted_jobs_failed(self):
+        from app import db
+        db._ORPHAN_SWEEP_DONE = False
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
+                "VALUES ('stale.pdf', '/tmp/stale.pdf', 'processing', 0)"
+            )
+            stale_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+        try:
+            db.fail_orphaned_jobs()
+            row = db.get_document(stale_id)
+            assert row["status"] == "failed"
+            assert "Interrupted" in row["error_message"]
+        finally:
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM documents WHERE id = ?", (stale_id,))
+
+    def test_the_sweep_runs_only_once_per_process(self):
+        from app import db
+        db._ORPHAN_SWEEP_DONE = False
+        db.fail_orphaned_jobs()
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
+                "VALUES ('live2.pdf', '/tmp/live2.pdf', 'processing', 0)"
+            )
+            live_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+        try:
+            db.fail_orphaned_jobs()
             assert db.get_document(live_id)["status"] == "processing"
         finally:
             with db.get_conn() as conn:

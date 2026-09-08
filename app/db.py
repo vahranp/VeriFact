@@ -141,17 +141,23 @@ def init_db():
         # byte-identical upload is only valid while it still matches.
         _ensure_column(conn, "documents", "pipeline_fingerprint", "TEXT")
 
-    _fail_orphaned_jobs()
 
-
-# The orphan sweep must run exactly once per process, at startup. init_db()
-# is also called from tests and could in principle be called again while a
-# job is genuinely in flight -- sweeping then would kill a live job, which
-# is precisely the failure it exists to clean up after.
+# The sweep must run only when the SERVER starts, never from init_db().
+#
+# It was originally called from init_db() with a once-per-process guard,
+# and that guard was not enough -- it bit within minutes. A separate
+# python process querying the database calls init_db(), gets its own fresh
+# module state, and sweeps: it marked a document that the running server
+# was actively extracting as "failed". A per-process guard cannot see
+# other processes.
+#
+# The server owns background jobs, so only the server may declare them
+# orphaned. main.py calls this from its startup hook; scripts and tests
+# touching the same database no longer touch running work.
 _ORPHAN_SWEEP_DONE = False
 
 
-def _fail_orphaned_jobs():
+def fail_orphaned_jobs():
     """Marks documents left mid-processing by a previous run as failed.
 
     Ingestion runs as a FastAPI BackgroundTask inside the server process,

@@ -33,6 +33,16 @@ app.add_middleware(
 
 db.init_db()
 
+
+@app.on_event("startup")
+def _recover_interrupted_jobs():
+    """Ingestion runs in this process, so anything mid-flight when it last
+    stopped is unrecoverable. Swept here rather than in db.init_db()
+    because only the server owns those jobs -- a script or test calling
+    init_db() must never mark the running server's work as failed."""
+    db.fail_orphaned_jobs()
+
+
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
