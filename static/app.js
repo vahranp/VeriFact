@@ -222,8 +222,8 @@ function paintChrome() {
 
 // ---------------- routing ----------------
 
-const VIEWS = ["overview", "document", "graph", "relationships", "facts", "coherence", "documents", "issues", "upload"];
-const TITLES = { overview: "Overview", graph: "Knowledge Graph", relationships: "Relationships", facts: "Facts", coherence: "Logic Check", documents: "All documents", issues: "Extraction Issues", upload: "Upload document" };
+const VIEWS = ["overview", "document", "priority", "graph", "relationships", "facts", "coherence", "timelines", "documents", "issues", "upload"];
+const TITLES = { overview: "Overview", priority: "Priority", graph: "Knowledge Graph", relationships: "Relationships", facts: "Facts", coherence: "Logic Check", timelines: "Timelines", documents: "All documents", issues: "Extraction Issues", upload: "Upload document" };
 
 function go(route) { if (location.hash.slice(1) !== route) location.hash = route; else route_(route); }
 
@@ -246,6 +246,8 @@ async function route_(route) {
   if (view === "documents") renderDocTable();
   if (view === "issues") renderIssues();
   if (view === "coherence") renderCoherence();
+  if (view === "priority") renderPriority();
+  if (view === "timelines") renderTimelines();
 }
 
 document.querySelectorAll(".sb-item[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
@@ -919,5 +921,184 @@ async function renderCoherence() {
     than inheriting a known error.</div>
     ${d.inferences.length ? d.inferences.map(cohInference).join("") : empty("Nothing further follows from the current graph.")}`;
 
+  animateIn(body);
+}
+
+// ---------------- priority (attention triage) ----------------
+// Deterministic ranking (app/priority.py) -- no model call. Combines
+// signals already proven elsewhere: a coherence violation, an arithmetic
+// scale-anomaly suspect, an unexplained contradiction, unverified
+// evidence. Tells a reviewer where to look first in a corpus too large
+// to read end to end.
+
+const PRIO_BADGE = {
+  critical: { cls: "b-contradicts", label: "Critical" },
+  high: { cls: "b-warn-high", label: "High" },
+  medium: { cls: "b-reconciled", label: "Medium" },
+  low: { cls: "b-done", label: "Low" },
+};
+
+function priorityBadge(level) {
+  const m = PRIO_BADGE[level] || { cls: "", label: level };
+  return `<span class="badge ${m.cls}">${m.label}</span>`;
+}
+
+function priorityReasons(reasons) {
+  return `<div class="prio-reasons">${(reasons || []).map((r) => `<div class="prio-reason">${I.arrow}<span>${esc(r)}</span></div>`).join("")}</div>`;
+}
+
+function priorityFactRow(f) {
+  return `<div class="prio-item rise">
+    <div class="prio-item-h">${priorityBadge(f.priority_level)}<span class="small num">score ${f.priority_score}</span></div>
+    ${priorityReasons(f.priority_reasons)}
+    ${factCard(f)}
+  </div>`;
+}
+
+function priorityRelRow(r) {
+  return `<div class="prio-item rise">
+    <div class="prio-item-h">${priorityBadge(r.priority_level)}<span class="small num">score ${r.priority_score}</span></div>
+    ${priorityReasons(r.priority_reasons)}
+    ${relCard(r)}
+  </div>`;
+}
+
+async function renderPriority() {
+  const head = $("prioHead"), body = $("prioBody");
+  if (!head || !body) return;
+  head.innerHTML = `<div class="empty">${I.loader}<span>Ranking…</span></div>`;
+  body.innerHTML = "";
+
+  let d;
+  try {
+    d = await (await fetch(`${API}/api/priority?limit=200`)).json();
+  } catch (e) {
+    head.innerHTML = empty("Could not load priority ranking.");
+    return;
+  }
+
+  const cnt = $("cPriority");
+  if (cnt) cnt.textContent = (d.level_counts.critical || 0) + (d.level_counts.high || 0);
+
+  head.innerHTML = `
+    <div class="note">
+      With hundreds of facts, nobody reads all of them. This ranks every fact and relationship by
+      what's already <b>proven</b> about it — no extra model call, no new opinion — combining a
+      coherence violation (a logical proof), an arithmetic scale-anomaly flag, an unexplained
+      contradiction, and unverified evidence into one priority.
+    </div>
+    <div class="grid g4 mb24">
+      ${statTile("Critical", d.level_counts.critical || 0, "proven errors or unexplained conflicts", I.alert, (d.level_counts.critical || 0) ? "warn" : "good")}
+      ${statTile("High", d.level_counts.high || 0, "needs review soon", I.zap, "")}
+      ${statTile("Medium", d.level_counts.medium || 0, "worth a look", I.timer, "")}
+      ${statTile("Low", d.level_counts.low || 0, "no elevated signal", I.check, "good")}
+    </div>`;
+  animateIn(head);
+
+  S.priority = d;
+  paintPriorityList();
+}
+
+function paintPriorityList() {
+  const body = $("prioBody");
+  const d = S.priority;
+  if (!body || !d) return;
+  const type = $("prioType") ? $("prioType").value : "facts";
+  const level = $("prioLevel") ? $("prioLevel").value : "";
+
+  const items = (type === "relationships" ? d.relationships : d.facts)
+    .filter((x) => !level || x.priority_level === level);
+
+  body.innerHTML = items.length
+    ? items.map(type === "relationships" ? priorityRelRow : priorityFactRow).join("")
+    : empty("Nothing at this priority level.");
+  animateIn(body);
+}
+
+["prioType", "prioLevel"].forEach((id) => {
+  document.addEventListener("change", (ev) => { if (ev.target && ev.target.id === id) paintPriorityList(); });
+});
+
+// ---------------- timelines ----------------
+// A `corroborates`/`reconciled` relationship already claims two facts
+// describe the same metric; chaining that claim across periods (app/
+// timeline.py) turns isolated facts into a trend, with no new extraction.
+
+function sparkline(points, w = 240, h = 56) {
+  const values = points.map((p) => p.normalized_value);
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const span = hi - lo || 1;
+  const stepX = points.length > 1 ? w / (points.length - 1) : 0;
+  const coords = values.map((v, i) => [i * stepX, h - ((v - lo) / span) * (h - 10) - 5]);
+  const path = coords.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const dots = coords.map(([x, y], i) => {
+    const up = i > 0 && values[i] >= values[i - 1];
+    const color = i === 0 ? "var(--ink-3)" : (up ? "var(--pos)" : "var(--neg)");
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.2" fill="${color}"/>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" class="spark">
+    <path d="${path}" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    ${dots}
+  </svg>`;
+}
+
+function timelineCard(t) {
+  const rows = t.points.map((p) => {
+    const pct = p.pct_change_from_previous;
+    const pctHtml = pct == null ? "" :
+      `<span class="tl-pct ${pct >= 0 ? "up" : "down"}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct)}%</span>`;
+    return `<tr>
+      <td>${esc(p.period_label)}</td>
+      <td class="num">${esc(p.value)}${p.unit ? ` <span class="small">${esc(p.unit)}</span>` : ""}</td>
+      <td>${pctHtml}</td>
+      <td class="small">${esc(docName(p.document_name))}</td>
+    </tr>`;
+  }).join("");
+
+  return `<div class="card rise mb16">
+    <div class="card-h">
+      <div><h3>${esc(t.label)}</h3><div class="sub">${t.points.length} periods${t.scope_used ? ` · ${esc(t.scope_used)} scope` : ""}</div></div>
+      ${sparkline(t.points)}
+    </div>
+    <div class="card-b">
+      <div class="tw"><table class="tl-table">
+        <thead><tr><th>Period</th><th class="r">Value</th><th>Change</th><th>Source</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </div>
+  </div>`;
+}
+
+async function renderTimelines() {
+  const head = $("tlHead"), body = $("tlBody");
+  if (!head || !body) return;
+  head.innerHTML = `<div class="empty">${I.loader}<span>Finding trends…</span></div>`;
+  body.innerHTML = "";
+
+  let d;
+  try {
+    d = await (await fetch(`${API}/api/timelines`)).json();
+  } catch (e) {
+    head.innerHTML = empty("Could not load timelines.");
+    return;
+  }
+
+  const cnt = $("cTimelines");
+  if (cnt) cnt.textContent = d.count || "";
+
+  head.innerHTML = `
+    <div class="note">
+      A <b>corroborates</b> or <b>reconciled</b> relationship already claims two facts describe the
+      same metric. Chaining that claim across distinct periods turns isolated facts into a trend —
+      no new extraction, no model call, entirely derived from relationships already in the graph.
+    </div>
+    <div class="grid g4 mb24">
+      ${statTile("Trends found", d.count, "metric families with 2+ periods", I.zap, d.count ? "pos" : "")}
+    </div>`;
+  animateIn(head);
+
+  body.innerHTML = d.timelines.length
+    ? d.timelines.map(timelineCard).join("")
+    : empty("No metric appears at two or more distinct, comparable periods yet.");
   animateIn(body);
 }

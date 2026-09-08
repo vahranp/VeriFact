@@ -32,6 +32,7 @@ class TestReadEndpointsRespond:
     @pytest.mark.parametrize("path", [
         "/api/documents", "/api/facts", "/api/relationships",
         "/api/issues", "/api/stats", "/api/coherence",
+        "/api/priority", "/api/timelines",
     ])
     def test_endpoint_returns_200(self, client, path):
         assert client.get(path).status_code == 200
@@ -41,6 +42,58 @@ class TestReadEndpointsRespond:
         schema = client.get("/openapi.json").json()
         assert "/api/facts" in schema["paths"]
         assert "FactOut" in schema["components"]["schemas"]
+
+
+class TestPriorityEndpoint:
+    def test_response_shape(self, client):
+        body = client.get("/api/priority").json()
+        assert "facts" in body and "relationships" in body and "level_counts" in body
+
+    def test_facts_are_sorted_most_urgent_first(self, client):
+        facts = client.get("/api/priority").json()["facts"]
+        levels = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        ordered = [levels[f["priority_level"]] for f in facts]
+        assert ordered == sorted(ordered)
+
+    def test_every_ranked_fact_carries_reasons(self, client):
+        facts = client.get("/api/priority").json()["facts"]
+        assert all(f["priority_reasons"] for f in facts)
+
+    def test_a_limit_is_respected(self, client):
+        body = client.get("/api/priority", params={"limit": 3}).json()
+        assert len(body["facts"]) <= 3
+        assert len(body["relationships"]) <= 3
+
+    def test_scoping_to_a_nonexistent_document_is_404(self, client):
+        assert client.get("/api/priority", params={"document_id": 99999999}).status_code == 404
+
+    def test_an_invalid_document_id_is_422(self, client):
+        assert client.get("/api/priority", params={"document_id": 0}).status_code == 422
+
+
+class TestTimelinesEndpoint:
+    def test_response_shape(self, client):
+        body = client.get("/api/timelines").json()
+        assert "timelines" in body and "count" in body
+        assert body["count"] == len(body["timelines"])
+
+    def test_every_timeline_has_at_least_two_points(self, client):
+        for t in client.get("/api/timelines").json()["timelines"]:
+            assert len(t["points"]) >= 2
+
+    def test_points_carry_original_and_normalized_values(self, client):
+        timelines = client.get("/api/timelines").json()["timelines"]
+        if timelines:
+            point = timelines[0]["points"][0]
+            assert "value" in point and "normalized_value" in point and "period_label" in point
+
+    def test_the_first_point_has_no_pct_change(self, client):
+        timelines = client.get("/api/timelines").json()["timelines"]
+        if timelines:
+            assert timelines[0]["points"][0]["pct_change_from_previous"] is None
+
+    def test_scoping_to_a_nonexistent_document_is_404(self, client):
+        assert client.get("/api/timelines", params={"document_id": 99999999}).status_code == 404
 
     def test_stats_reports_both_grounding_levels(self, client):
         stats = client.get("/api/stats").json()

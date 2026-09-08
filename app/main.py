@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api_models import (
-    CoherenceOut, DocumentOut, FactOut, IssueOut, RelationshipOut, StatsOut,
-    UploadAccepted,
+    CoherenceOut, DocumentOut, FactOut, IssueOut, PriorityOut, RelationshipOut,
+    StatsOut, TimelineOut, UploadAccepted,
 )
 
 from app import db
@@ -24,6 +24,8 @@ from app.coherence import check_coherence
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
 from app.pdf_extract import PageSpecError, has_extractable_text, is_encrypted, page_count, parse_page_spec
 from app.pipeline import process_document
+from app.priority import rank_facts, rank_relationships
+from app.timeline import build_timelines
 
 app = FastAPI(title="Fact Knowledge Layer")
 app.add_middleware(
@@ -460,4 +462,104 @@ def graph_coherence(limit: int = Query(25, ge=1, le=200)):
             }
             for i in report.inferences[:limit]
         ],
+    }
+
+
+@app.get("/api/priority", response_model=PriorityOut,
+         summary="Facts and relationships ranked by deterministic attention priority",
+         responses={404: {"description": "No such document"}})
+def priority(document_id: Optional[int] = Query(None, ge=1), limit: int = Query(50, ge=1, le=500)):
+    """Where to look first, computed without a model call.
+
+    Combines signals already proven elsewhere in this project -- a
+    logically impossible coherence triangle (proof, not suspicion), an
+    arithmetic scale-anomaly suspect, an unexplained contradiction, an
+    unverified quote -- into one ranking, rather than spending an LLM call
+    on one more unverified opinion about what matters. See app/priority.py.
+    """
+    if document_id is not None and not db.get_document(document_id):
+        raise HTTPException(404, "Document not found")
+
+    facts = db.list_facts()
+    relationships = db.list_relationships()
+    cache: dict = {}
+
+    ranked_facts = rank_facts(facts, relationships, document_id=document_id)[:limit]
+    ranked_rels = rank_relationships(
+        relationships, facts_by_id={f["id"]: f for f in facts}, document_id=document_id,
+    )[:limit]
+
+    level_counts: dict = {}
+    for _, score in rank_facts(facts, relationships, document_id=document_id):
+        level_counts[score.level] = level_counts.get(score.level, 0) + 1
+
+    return {
+        "facts": [
+            {**_enrich_fact(f, cache), "priority_level": score.level,
+             "priority_score": score.score, "priority_reasons": score.reasons}
+            for f, score in ranked_facts
+        ],
+        "relationships": [
+            {
+                **r,
+                "fact_a": _enrich_fact(db.get_fact(r["fact_id_a"]), cache) if db.get_fact(r["fact_id_a"]) else None,
+                "fact_b": _enrich_fact(db.get_fact(r["fact_id_b"]), cache) if db.get_fact(r["fact_id_b"]) else None,
+                "priority_level": score.level, "priority_score": score.score,
+                "priority_reasons": score.reasons,
+            }
+            for r, score in ranked_rels
+        ],
+        "level_counts": level_counts,
+    }
+
+
+@app.get("/api/timelines", response_model=TimelineOut,
+         summary="Metric trends discovered across periods, from relationships already stored",
+         responses={404: {"description": "No such document"}})
+def timelines(document_id: Optional[int] = Query(None, ge=1)):
+    """Chains of corroborates/reconciled facts across distinct periods,
+    turned into timelines -- revenue FY22 -> FY23 -> FY24, a headcount
+    over several quarters, whatever the document actually reports. No new
+    extraction and no model call: this only follows relationships and
+    periods that already exist. See app/timeline.py.
+    """
+    if document_id is not None and not db.get_document(document_id):
+        raise HTTPException(404, "Document not found")
+
+    facts = db.list_facts()
+    relationships = db.list_relationships()
+    if document_id is not None:
+        fact_ids = {f["id"] for f in facts if f["document_id"] == document_id}
+        relationships = [r for r in relationships
+                         if r["fact_id_a"] in fact_ids or r["fact_id_b"] in fact_ids]
+
+    cache: dict = {}
+    found = build_timelines(facts, relationships)
+    return {
+        "timelines": [
+            {
+                "label": t.label,
+                "base_unit": t.base_unit,
+                "scope_used": t.scope_used,
+                "summary": t.summary(),
+                "points": [
+                    {
+                        "fact_id": p.fact_id,
+                        "document_name": _doc_name(p.document_id, cache),
+                        "period_label": p.period_label,
+                        "value": p.original_value,
+                        "unit": p.original_unit,
+                        "normalized_value": p.value,
+                        "scope": p.scope,
+                        "statement": p.statement,
+                        "pct_change_from_previous": (
+                            p.pct_change_from(t.points[i - 1]) if i > 0 else None
+                        ),
+                    }
+                    for i, p in enumerate(t.points)
+                ],
+            }
+            for t in found
+        ],
+        "count": len(found),
     }

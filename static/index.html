@@ -26,6 +26,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
         Overview
       </button>
+      <button class="sb-item" data-view="priority">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V13"/><path d="M4 9V3"/><path d="M12 21v-6"/><path d="M12 11V3"/><path d="M20 21v-4"/><path d="M20 13V3"/><path d="M2 13h4"/><path d="M10 11h4"/><path d="M18 13h4"/></svg>
+        Priority <span class="sb-count" id="cPriority"></span>
+      </button>
       <button class="sb-item" data-view="graph">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.7" x2="15.4" y2="6.3"/><line x1="8.6" y1="13.3" x2="15.4" y2="17.7"/></svg>
         Knowledge Graph
@@ -41,6 +45,10 @@
       <button class="sb-item" data-view="coherence">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="18" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M10.4 6.9 6.6 15.9"/><path d="M13.6 6.9l3.8 9"/><path d="M7.4 18h9.2"/></svg>
         Logic Check <span class="sb-count" id="cCoh"></span>
+      </button>
+      <button class="sb-item" data-view="timelines">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 6"/><polyline points="15 6 21 6 21 12"/></svg>
+        Timelines <span class="sb-count" id="cTimelines"></span>
       </button>
       <button class="sb-item" data-view="issues">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -163,6 +171,28 @@
           <span class="small" id="factCount"></span>
         </div>
         <div id="factList"></div>
+      </section>
+
+      <!-- priority -->
+      <section id="view-priority" class="view">
+        <div id="prioHead"></div>
+        <div class="toolbar">
+          <select id="prioType"><option value="facts">Facts</option><option value="relationships">Relationships</option></select>
+          <select id="prioLevel">
+            <option value="">All levels</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <div id="prioBody"></div>
+      </section>
+
+      <!-- timelines -->
+      <section id="view-timelines" class="view">
+        <div id="tlHead"></div>
+        <div id="tlBody"></div>
       </section>
 
       <!-- documents -->

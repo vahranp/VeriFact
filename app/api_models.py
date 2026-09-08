@@ -116,3 +116,24 @@ class CoherenceOut(_Permissive):
     inferences_total: int
     violations: list[Any]
     inferences: list[Any]
+
+
+class PriorityOut(_Permissive):
+    facts: list[Any] = Field(
+        description="Facts ranked most-urgent-first: level (critical/high/medium/low), "
+                    "score, and the specific reasons behind it."
+    )
+    relationships: list[Any] = Field(
+        description="Relationships ranked the same way -- a coherence-proven error always "
+                    "outranks a mere disagreement, which outranks an already-explained one."
+    )
+    level_counts: dict = Field(description="How many facts fall into each priority level.")
+
+
+class TimelineOut(_Permissive):
+    timelines: list[Any] = Field(
+        description="Metric families discovered by following corroborates/reconciled "
+                    "relationships across distinct periods -- e.g. revenue FY22->FY23->FY24. "
+                    "No new extraction; derived entirely from relationships already stored."
+    )
+    count: int
