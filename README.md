@@ -791,6 +791,19 @@ during development.
 - **Relationship candidate retrieval is a linear scan over all embeddings in Python/numpy.** Fine
   for low thousands of facts; would need an actual vector index (FAISS/pgvector/etc.) for many
   documents at real scale — noted in the code as the specific place this would need to change.
+- **Recall is bounded by the embedding shortlist, independent of corpus size.** Only the top
+  `SIMILARITY_TOP_K` (4) nearest facts by embedding similarity become candidates at all; entity/
+  lexical/numeric signals then rerank *within* that shortlist (measured and kept — see
+  `app/relationships.py`'s `HYBRID_SCAN_K` comment) but cannot rescue a genuinely related fact that
+  MiniLM ranked outside it. A "no relationship found" result can honestly mean "the correct match
+  never reached the candidate pool," not "the two facts were compared and judged unrelated" — those
+  are different findings, and only the API's `candidate_reason` field currently lets you tell them
+  apart.
+- **Fact extraction is capped at 15 facts per chunk by prompt instruction**, prioritizing quality
+  and variety over exhaustiveness on dense pages. This is a deliberate trade-off for a page that
+  states 40 similar figures (e.g. a long line-item table), not a hard technical ceiling — but it
+  does mean the system does not claim to extract *every* stated fact, only the meaningful ones a
+  chunk-sized window has room to surface.
 - **De-duplication of near-identical facts** from overlapping chunks was planned, then measured
   and not built: across all 304 extracted facts there were **0 exact duplicates and 0
   near-duplicates** within a document. The 150-character overlap region rarely contains a
