@@ -19,3 +19,8 @@ dom.html
 
 # Audit/benchmark run logs
 *.log
+
+# Regeneratable evaluation run output (see evaluation/run_benchmark.py) --
+# the numbers that matter are written into README.md/FINAL_REVIEW.md,
+# not tracked as raw artifacts here.
+evaluation/results/

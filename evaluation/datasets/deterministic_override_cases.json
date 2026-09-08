@@ -1,0 +1,236 @@
+[
+  {
+    "id": "do-01",
+    "category": "CONTRADICTION",
+    "notes": "LLM wrongly proposes 'reconciled' with an invented reason on a same-period, same-scope, verified 20-unit gap -- adjudication rule 5 must override to contradicts.",
+    "fact_a": {
+      "id": -1065,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY24).",
+      "quote": "100 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1066,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "120",
+      "value_numeric": 120.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 120 INR million (FY24).",
+      "quote": "120 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "llm_proposal": {
+      "relation_type": "reconciled",
+      "explanation": "Fabricated: figures reflect a restatement.",
+      "reconciliation_context": "restatement",
+      "confidence": 0.8
+    }
+  },
+  {
+    "id": "do-02",
+    "category": "EXACT_CORROBORATION",
+    "notes": "LLM wrongly proposes 'uncertain' on values that verify as equal, same period/scope -- rule 4 must override to corroborates regardless.",
+    "fact_a": {
+      "id": -1067,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY24).",
+      "quote": "100 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1068,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY24).",
+      "quote": "100 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "llm_proposal": {
+      "relation_type": "uncertain",
+      "explanation": "Fabricated: model expressed unwarranted doubt.",
+      "reconciliation_context": null,
+      "confidence": 0.4
+    }
+  },
+  {
+    "id": "do-03",
+    "category": "RELATED_NOT_COMPARABLE",
+    "notes": "LLM wrongly proposes 'contradicts' between a percentage and an absolute count -- rule 1 (incompatible units) must override to related_but_not_comparable.",
+    "fact_a": {
+      "id": -1069,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "turnover rate",
+      "value": "12%",
+      "value_numeric": 12.0,
+      "unit": "%",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics turnover rate was 12% % (FY24).",
+      "quote": "12% %",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1070,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "turnover count",
+      "value": "45",
+      "value_numeric": 45.0,
+      "unit": "count",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics turnover count was 45 count (FY24).",
+      "quote": "45 count",
+      "evidence_status": "fact_validated"
+    },
+    "llm_proposal": {
+      "relation_type": "contradicts",
+      "explanation": "Fabricated: model conflated a rate with a count.",
+      "reconciliation_context": null,
+      "confidence": 0.7
+    }
+  },
+  {
+    "id": "do-04",
+    "category": "UNCERTAIN",
+    "notes": "LLM wrongly proposes a confident 'contradicts' on a magnitude-suspect (~1,000,000x) gap that is almost certainly a unit-metadata error -- rule 2 must cap at uncertain.",
+    "fact_a": {
+      "id": -1071,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "total equity",
+      "value": "91,446.46",
+      "value_numeric": 91446.46,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": null,
+      "statement": "Northwind Logistics total equity was 91,446.46 INR million (FY24).",
+      "quote": "91,446.46 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1072,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "total equity",
+      "value": "85,466.74",
+      "value_numeric": 85466.74,
+      "unit": "INR",
+      "time_period": "FY24",
+      "scope": null,
+      "statement": "Northwind Logistics total equity was 85,466.74 INR (FY24).",
+      "quote": "85,466.74 INR",
+      "evidence_status": "fact_validated"
+    },
+    "llm_proposal": {
+      "relation_type": "contradicts",
+      "explanation": "Fabricated: model did not notice the ~1,000,000x gap.",
+      "reconciliation_context": null,
+      "confidence": 0.9
+    }
+  },
+  {
+    "id": "do-05",
+    "category": "CONTEXT_RECONCILIATION",
+    "notes": "LLM wrongly proposes 'contradicts' on facts whose period is confirmed DIFFERENT -- rule 6 must override to reconciled.",
+    "fact_a": {
+      "id": -1073,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY23",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY23).",
+      "quote": "100 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1074,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "140",
+      "value_numeric": 140.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 140 INR million (FY24).",
+      "quote": "140 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "llm_proposal": {
+      "relation_type": "contradicts",
+      "explanation": "Fabricated: model ignored the differing fiscal years.",
+      "reconciliation_context": null,
+      "confidence": 0.85
+    }
+  },
+  {
+    "id": "do-06",
+    "category": "UNCERTAIN",
+    "notes": "LLM wrongly proposes a confident 'corroborates' when fact B's evidence is unverified -- rule 3 must cap at uncertain rather than trust an unverified value.",
+    "fact_a": {
+      "id": -1075,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY24).",
+      "quote": "100 INR million",
+      "evidence_status": "fact_validated"
+    },
+    "fact_b": {
+      "id": -1076,
+      "page_number": 1,
+      "subject": "Northwind Logistics",
+      "attribute": "revenue",
+      "value": "100",
+      "value_numeric": 100.0,
+      "unit": "INR million",
+      "time_period": "FY24",
+      "scope": "consolidated",
+      "statement": "Northwind Logistics revenue was 100 INR million (FY24).",
+      "quote": "100 INR million",
+      "evidence_status": "quote_grounded"
+    },
+    "llm_proposal": {
+      "relation_type": "corroborates",
+      "explanation": "Fabricated: model trusted an unverified value.",
+      "reconciliation_context": null,
+      "confidence": 0.9
+    }
+  }
+]

@@ -205,6 +205,27 @@ class TestMetricPromptGuidance:
         from app.relationships import SYSTEM_PROMPT_METRIC
         assert '"revenue from services"' not in SYSTEM_PROMPT_METRIC
 
+    def test_slice_examples_are_not_a_copyable_verbatim_answer(self):
+        """Found via evaluation/run_benchmark.py, not by inspection: the
+        local 8B model, given two terse facts with no stated slice on
+        either side, reliably answered slice_a="North region" -- a value
+        that appeared nowhere in either fact's text, but did appear
+        verbatim in this prompt's own worked example ("revenue in the
+        North region" -> slice is "North region"). Reproduced on 4
+        independent fact pairs before the fix. The fix is two-fold: no
+        single example is memorable/reusable as a real-sounding answer on
+        its own (two different geography-style phrasings instead of one),
+        and the prompt says outright not to reuse an example's qualifier.
+        This test guards the specific regression, not the general
+        principle (which isn't statically checkable) -- if a live rerun
+        of evaluation/datasets/relationship_benchmark.json ever produces
+        "North region" (or any example phrase) as a slice for a fact pair
+        that doesn't state it, that's this bug back."""
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        assert '"revenue in the North region" -> slice is "North region"' not in SYSTEM_PROMPT_METRIC
+        assert "never reuse a qualifier from these examples" in SYSTEM_PROMPT_METRIC
+        assert "do not invent one" in SYSTEM_PROMPT_METRIC
+
 
 class TestPromptInjectionGuidance:
     """Facts fed into these prompts originate from PDF text (see

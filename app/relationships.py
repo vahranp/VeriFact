@@ -113,9 +113,13 @@ Work through this in two stages, in order.
 STAGE 1 -- name the SLICE each fact measures. A slice is the qualifier that narrows a broad \
 measure down to one part of it: a business segment, a product line, a geography, a division, a \
 customer type, a facility. Write it as a short phrase, or "whole" if the fact covers the entire \
-measure with no narrowing qualifier. Examples: "cross border revenue" -> slice is "cross border"; \
-"revenue in the North region" -> slice is "North region"; "total revenue" or "revenue from \
-operations" -> slice is "whole".
+measure with no narrowing qualifier. A slice name must be copied from what THIS fact's own text \
+actually says -- never reuse a qualifier from these examples, which only illustrate the PATTERN: \
+"cross border revenue" -> slice is "cross border"; "revenue in the East division" -> slice is \
+"East division"; "warehouse footprint in the Mumbai cluster" -> slice is "Mumbai cluster"; "total \
+revenue" or "revenue from operations" -> slice is "whole". If neither fact's own wording names a \
+segment, geography, division, customer type, or facility, the slice is "whole" for both -- do not \
+invent one.
 
 CRITICAL -- reporting CONTEXT is not a slice. The reporting period (FY24, Q1, "year ended March \
 31") and the reporting basis or scope (consolidated vs standalone, group vs company, gross vs net, \

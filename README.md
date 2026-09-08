@@ -779,6 +779,170 @@ an absence-of-hardcoding argument: it produces sensible, evidence-grounded outpu
 from two organizations, two domains, and two table conventions this codebase was never shown
 during development.
 
+### Evaluation methodology
+
+Everything above this point argues the architecture is sound. This section
+measures it — with a benchmark kept structurally separate from the
+pipeline it measures (`evaluation/`, never imported by `app/` — verify
+with `grep -rn "^from evaluation\|^import evaluation" app/`, which prints
+nothing) so a measurement can never leak into a production rule. Full
+methodology, dataset provenance, and how to reproduce every number below:
+[`evaluation/README.md`](evaluation/README.md).
+
+**Development vs. held-out data.** Every prompt and threshold in `app/`
+was written against the three Delhivery documents. The IMF and RBI
+documents used for [generalization](#generalization-proven-empirically-an-imf-article-iv-report-and-an-rbi-annual-report)
+above were never referenced by any code path and were ingested only after
+this pass's adjudication/evidence/context work was finished — a genuine,
+if not formally pre-registered, held-out check. Six of the 32 relationship
+benchmark cases below, and part of the evidence sample, draw on real facts
+from that held-out set.
+
+**Candidate retrieval — Recall@K, measured against the real 2,550-fact
+corpus** (`python -m evaluation.run_benchmark --skip-relationships`):
+
+| K | Recall |
+|---|---:|
+| 4 | 84.7% |
+| 8 | 92.7% |
+| 16 | 97.3% |
+| 32 | 99.3% |
+
+Steep diminishing returns past K=4 (+8pp for double the candidates at
+K=8, +4.6pp at K=16, +2pp at K=32) confirm `SIMILARITY_TOP_K=4` as a
+reasonable default, not merely an unexamined one — each doubling costs
+proportionally more LLM calls for a shrinking recall gain. This is an
+embedding-only measurement; production's actual recall is measurably
+higher because of the entity/lexical/numeric reranking described in
+[Relationship reasoning](#relationship-reasoning), which this number
+deliberately isolates from.
+
+**Evidence validation**, scored against 35 real facts sampled at random
+from the corpus and independently labelled by reading each quote directly
+(not by asking the production LLM to grade itself — see
+`evaluation/README.md` for the full labeling methodology, including one
+labeling mistake caught and corrected mid-review):
+
+| Metric | Result |
+|---|---:|
+| Precision | 86.7% |
+| Recall | 100.0% |
+| F1 | 92.9% |
+
+The 4 false positives all share one root cause, not previously documented:
+a `value_numeric` extracted from an incidental digit that isn't a real
+quantity at all — a footnote marker (`"1/"` → `1.0`), a bond-tenor label
+(`"5y"` → `5.0`), a date fragment (`"Sep-25"` → `-25.0`), and a **fax
+number** (`"(202) 623-7201"` → `-202.0`, the parenthesized-negative
+convention misfiring on a phone number) — all still pass evidence
+validation because that digit genuinely is on the page. The check's job is
+verifying number *presence*, not number *appropriateness*; it isn't
+designed to catch this, and now honestly doesn't claim to. Two further
+adversarial fixtures (`evaluation/evidence_eval.py`) confirm the
+already-documented "wrong table column" limitation is still real and
+reproducible under current code, and one confirms the original
+row-label bug (`value=779`, `quote="Number of complaints..."`) is still
+correctly caught.
+
+**Relationship classification — LLM proposal vs. final VeriFact answer**,
+on 38 cases (26 constructed fixtures with true-by-construction labels + 6
+real fact pairs from the corpus, run live through the actual
+`classify_pair()`; 6 deterministic-only cases exercising `adjudicate()`
+directly with a synthetic LLM mistake, the same pattern
+`tests/test_adjudication.py` uses):
+
+| Metric | Result |
+|---|---:|
+| Raw LLM proposal accuracy | 43.3% (of 30 cases with a live proposal) |
+| **Final VeriFact accuracy** | **78.9%** (38 cases) |
+| Macro F1 (final) | 76.0% |
+| LLM proposals that were wrong | 17 |
+| — corrected by the deterministic layer | 13 |
+| — still wrong after adjudication | 4 |
+| New errors introduced by an override | 0 |
+
+An earlier pass of this same run showed 1 override "introducing" an
+error; it turned out the benchmark fixture itself (`ct-05`) had left
+`scope` unstated on both facts by oversight, so `insufficient_context`
+was the actually-correct deterministic answer given what the fixture
+said — not a regression. Fixed in the dataset (stated, matching scope on
+both sides, like its sibling fixtures) rather than quietly dropped;
+`evaluation/README.md` and this benchmark's own `notes` field on `ct-05`
+say so explicitly, because a benchmark that hides its own mistakes is
+worse than the thing it's measuring.
+
+Deterministic disagreement — the model's proposal and the final answer
+differing — fired on 10 of 38 cases (26%). That is a measurement of how
+often the safety net actually catches something, on a benchmark
+deliberately stocked with the failure modes it exists to catch; it is not
+a claim that 26% of everyday relationships disagree.
+
+This benchmark is also where a real, previously-undocumented model
+failure was found and fixed, not just measured: the local 8B model
+initially answered "different slice" on several trivially-same-metric
+pairs, fabricating a slice value (`"North region"`) that appeared in
+neither fact — traced to a worked example in `SYSTEM_PROMPT_METRIC`
+("revenue in the North region" → slice is "North region") that the model
+was copying verbatim on terse inputs instead of reasoning from the actual
+text. Confirmed reproducible on 4 independent pairs by inspecting the
+exact cached prompt and response, fixed by diversifying the examples and
+adding an explicit "never reuse a qualifier from these examples"
+instruction, and covered by a new regression test
+(`TestMetricPromptGuidance::test_slice_examples_are_not_a_copyable_verbatim_answer`).
+Raw LLM accuracy on this same benchmark went from 38.1% to 43.3% after
+that one fix — evidence the fix generalized rather than overfitting to
+the cases that found it.
+
+**What's still weak, stated plainly.** 8 of 38 cases are still wrong after
+that fix:
+
+- **Step 1 (metric-matching) is the actual bottleneck, not adjudication.**
+  4 mismatches never reach the deterministic layer at all because step 1
+  said "not the same metric": `"revenue from operations"` vs.
+  `"revenue from services"` on a terse constructed fact pair (correctly
+  recognized as synonymous on the real, richer Case 1 facts — `rm-01` — but
+  missed on a sparser one), and a `12` vs. `120` complaints pair where the
+  model's own step-1 reasoning cited the *values* as evidence the facts
+  measure "different counts" — precisely the confusion step 1's prompt
+  explicitly forbids ("NOT whether their values agree or disagree").
+  Adjudication cannot correct a pair it never receives.
+- **`RELATED_NOT_COMPARABLE` has real precision (100%) but weak recall
+  (20%, 1 of 5)** — most facts sharing a "rate vs. count" or "cost vs.
+  count" shape got classified `unrelated` at step 1 instead of reaching
+  step 2 and being correctly ruled not-comparable there. Whether a rate
+  and a count of the same underlying thing are "the same metric measured
+  two ways" or "two different metrics" is a genuinely fuzzy line — this
+  benchmark's own category boundary, not only the model's judgment, is
+  part of why recall reads low here, and that's stated rather than
+  smoothed over.
+- **One real step-1 false positive, safely contained.** A real RBI fact
+  pair (`rm-04`, Food Stocks vs. Foodgrains Production — a stock and a
+  flow, sharing a unit, period, and table) was accepted as the same metric
+  at step 1, then step 2 proposed `contradicts`. The deterministic layer
+  correctly noticed neither fact states a scope and capped the result at
+  `insufficient_context` rather than asserting a false contradiction — the
+  safety net doing its job on a bad premise it didn't create, which is
+  real value, but not the same as step 1 getting the premise right in the
+  first place.
+
+Per-class results, confusion matrix, and the full failure-analysis
+breakdown by root cause (context ambiguity vs. genuine semantic
+mismatch vs. benchmark-construction artifacts — each is real and each is
+labelled as what it is) are written to `evaluation/results/report.txt`
+(gitignored — a regenerated artifact, not a repo file) by
+running `python -m evaluation.run_benchmark`; several classes (e.g.
+`SEMANTIC_CORROBORATION`, `INSUFFICIENT_CONTEXT`) have fewer than 3
+ground-truth examples and are excluded from the macro average for
+exactly that reason rather than presented as statistically meaningful.
+
+**What this does and doesn't establish.** 38 relationship cases and 35
+scored evidence cases is enough to find real, reproducible failure modes
+(and it did) — it is not a large enough sample for tight confidence
+intervals on a per-class metric like contradiction recall. That
+limitation is stated here rather than papered over with a bigger-looking
+number; see `evaluation/README.md` for exactly which classes it applies
+to.
+
 ## Limitations and Next Steps
 
 - **Full-document ingestion is still slow with the local model**, even after this optimization

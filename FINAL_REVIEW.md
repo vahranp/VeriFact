@@ -537,3 +537,45 @@ gives, now with one addition: rewriting the fact model around a `ClaimIdentity` 
 nearly every module in `app/` at once, on a codebase that was already feature-complete and
 submitted -- exactly what this project's very first instruction said not to do ("do NOT redesign
 the entire project from scratch. The current architecture is already strong").
+
+## 15. A third follow-up round: an actual evaluation harness, not another rewrite ask
+
+A later request was different in kind from the two before it: not another proposal to rebuild the
+fact model, but a request to build a real, separate measurement harness and report honest numbers
+-- consistent with the brief's own "do NOT claim anything is solved until it has actually been
+tested" instruction, not in tension with it. This was implemented, not declined: `evaluation/`, a
+package `app/` never imports (`grep -rn "^from evaluation\|^import evaluation" app/` prints
+nothing), covering candidate-retrieval recall, evidence precision/recall, and relationship
+classification accuracy (raw LLM proposal vs. final adjudicated answer) against a 38-case benchmark
+(26 constructed fixtures with true-by-construction labels, 6 real fact pairs from the corpus
+independently labelled by reading their quotes, 6 deterministic-only `adjudicate()` cases). Full
+methodology and real, current numbers: `evaluation/README.md` and the "Evaluation methodology"
+section of `README.md`.
+
+Two things are worth recording here specifically because they're the kind of finding that only
+shows up when you actually build the harness rather than reason about whether you need one:
+
+- **The harness found a real, previously-undocumented model bug on its first run**, not just a
+  score: the local 8B model was fabricating a slice value ("North region") that appeared in neither
+  fact being compared, traced to a worked example in `SYSTEM_PROMPT_METRIC` that it was copying
+  verbatim on terse inputs instead of applying as a pattern. Confirmed via the actual cached
+  prompt/response (not inference), fixed in the prompt, covered by a regression test, and the fix
+  was verified to generalize (raw LLM accuracy on the same benchmark: 38.1% to 43.3%) rather than
+  merely satisfy the cases that found it -- the benchmark was re-run in full after the fix, not
+  patched selectively.
+- **The harness found a real bug in itself, too, and that's reported the same way.** One benchmark
+  fixture (`ct-05`) left `scope` unstated on both facts by a copy-paste oversight, making
+  `insufficient_context` the actually-correct deterministic answer given what the fixture said --
+  not the `contradicts` the fixture's label claimed. It briefly looked like "the deterministic layer
+  introduced a new error"; tracing it down showed the benchmark's own label was wrong. Fixed in the
+  dataset, documented in the fixture's own `notes` field and in `README.md`, rather than quietly
+  corrected and left unmentioned. A benchmark that hides its own construction mistakes would be
+  worse than not having one.
+
+Declined from that round, for reasons consistent with §13/§14: a formal 50-100-pair hand-labelled
+benchmark with inter-rater statistics (38 well-understood cases surfaced two real, actionable bugs;
+a bigger corpus was not the binding constraint), and re-deriving the IMF/RBI generalization proof
+as a formally pre-registered train/freeze split (the existing held-out run is real and undisturbed;
+relabelling its methodology after the fact would not make it more true, only more elaborately
+described -- `evaluation/README.md` states plainly that no formal freeze protocol was pre-registered,
+rather than implying one was).
