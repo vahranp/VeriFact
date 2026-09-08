@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app import db
-from app.cache import hash_fact_pair, hash_text
+from app.cache import canonical_pair_order, hash_fact_pair, hash_text
 from app.config import (
     LLM_CONCURRENCY, REASONING_MODEL, REASONING_TIMEOUT_SECONDS,
     SIMILARITY_TOP_K, SIMILARITY_THRESHOLD,
@@ -209,6 +209,14 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
     don't need to change to serve as before/after regression checks
     across this exact refactor.
 
+    The two facts are put into a canonical order before being shown to the
+    model (see cache.canonical_pair_order): the pair cache is deliberately
+    order-independent, so without this a pair first judged as (A, B) and
+    later met as (B, A) would be served a cached explanation whose "FACT A"
+    and "FACT B" referred to the wrong facts. `result["_meta"]["swapped"]`
+    reports whether that reordering happened, so a caller storing the
+    relationship can persist it in the same order the explanation describes.
+
     Internally runs up to two LLM calls (see module docstring for why).
     Step 2 is skipped entirely when step 1 says the facts aren't the same
     metric -- the common case (most candidate pairs are unrelated), so
@@ -217,6 +225,11 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
     information for the caller's stats (see build_relationships_for_document)
     without changing the public field shape relation_type/explanation/
     reconciliation_context/confidence that callers already expect."""
+    swapped = canonical_pair_order(fact_a, fact_b)
+    if swapped:
+        fact_a, fact_b = fact_b, fact_a
+        doc_a_name, doc_b_name = doc_b_name, doc_a_name
+
     metric_result, metric_cached = classify_metric_match(fact_a, doc_a_name, fact_b, doc_b_name)
 
     if not metric_result.get("same_metric"):
@@ -225,7 +238,8 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
             "explanation": metric_result.get("reason") or "The two facts do not describe the same underlying metric.",
             "reconciliation_context": None,
             "confidence": metric_result.get("confidence"),
-            "_meta": {"steps_run": 1, "llm_calls": 0 if metric_cached else 1, "same_metric": False},
+            "_meta": {"steps_run": 1, "llm_calls": 0 if metric_cached else 1,
+                       "same_metric": False, "swapped": swapped},
         }
         return result, metric_cached
 
@@ -242,6 +256,7 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
         "llm_calls": (0 if metric_cached else 1) + (0 if judge_cached else 1),
         "same_metric": True,
         "comparison": comparison_line,
+        "swapped": swapped,
     }
     return result, (metric_cached and judge_cached)
 
@@ -383,8 +398,11 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             summary["skipped_unrelated"] += 1
             continue
 
+        # Persist in the same order the explanation talks about, so the
+        # UI's left-hand fact is the one the text calls "FACT A".
+        first, second = (other, fact) if meta.get("swapped") else (fact, other)
         db.insert_relationship(
-            fact["id"], other["id"], relation,
+            first["id"], second["id"], relation,
             result.get("explanation", ""),
             result.get("reconciliation_context"),
             result.get("confidence"),

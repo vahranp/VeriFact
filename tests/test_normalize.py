@@ -161,3 +161,46 @@ class TestFormatComparisonForPrompt:
     def test_disagreement_is_stated_emphatically(self):
         line = format_comparison_for_prompt(compare_values(85466.74, "INR million", 91446.46, "INR million"))
         assert "DISAGREE" in line
+
+
+class TestCurrencyAliasBoundaries:
+    """Currency aliases must not match inside longer words.
+
+    Real bug: "rs" -> "inr" was applied with a trailing word boundary only,
+    so any unit whose name ends in "rs" was silently corrupted --
+    "hours" became "houinr", "years" became "yeainr", "workers" became
+    "workeinr". Two facts sharing such a unit still compared equal (both
+    were corrupted identically), which is why it survived unnoticed; but
+    the base unit shown in explanations was garbage, and a singular/plural
+    pair like "hour" vs "hours" stopped reducing to the same base.
+    """
+
+    import pytest as _pytest
+
+    @_pytest.mark.parametrize("unit", [
+        "hours", "years", "cars", "workers", "liters", "meters",
+        "containers", "gears", "sensors", "tons",
+    ])
+    def test_non_currency_units_are_left_alone(self, unit):
+        from app.normalize import normalize_unit
+        assert normalize_unit(1.0, unit).base_unit == unit
+
+    @_pytest.mark.parametrize("unit,expected", [
+        ("rs", "inr"), ("Rs.", "inr"), ("INR", "inr"), ("rupees", "inr"),
+        ("USD", "usd"), ("dollars", "usd"),
+    ])
+    def test_real_currency_aliases_still_fold(self, unit, expected):
+        from app.normalize import normalize_unit
+        assert normalize_unit(1.0, unit).base_unit == expected
+
+    def test_currency_with_scale_word_still_works(self):
+        from app.normalize import normalize_unit
+        n = normalize_unit(2.0, "Rs. crore")
+        assert n.base_unit == "inr" and n.value == 2.0 * 1e7
+
+    def test_the_case_1_comparison_is_unaffected(self):
+        """The headline corroboration must survive this fix."""
+        from app.normalize import compare_values
+        cmp = compare_values(8142.0, "INR Crore", 81415.38, "INR million")
+        assert cmp.comparable and cmp.agree
+        assert cmp.diff_pct < 0.01

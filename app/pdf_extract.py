@@ -93,22 +93,78 @@ def extract_chunks(pdf_path: str) -> list[Chunk]:
     return chunks
 
 
+# A selector can't ask for more pages than any real document has. Bounds
+# the set this builds so a typo like "1-100000" can't allocate its way
+# through memory before anything validates it.
+MAX_SELECTABLE_PAGE = 10_000
+
+
+class PageSpecError(ValueError):
+    """A page selector that can't be honoured. Carries a message meant to
+    be shown to whoever typed the selector."""
+
+
 def parse_page_spec(spec: str) -> set[int]:
     """Parses a page selector like "1,3,7-10" into {1,3,7,8,9,10}. Used to
     let a caller target specific pages of a large PDF instead of paying to
-    process every page -- a generically useful capability for big
-    documents, not just for bounding demo cost."""
+    process every page.
+
+    Raises PageSpecError with an explanatory message on anything malformed.
+    This used to raise a bare ValueError from int() deep inside the parse,
+    which is how a real upload of "24-24-24" got past the API, created a
+    document row, queued a background job, and then died with
+    "invalid literal for int() with base 10: '24-24'" -- a crashed job and
+    a 500, instead of a rejected input.
+    """
     pages: set[int] = set()
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
+
         if "-" in part:
-            lo, hi = part.split("-", 1)
-            pages.update(range(int(lo), int(hi) + 1))
+            bounds = part.split("-")
+            if len(bounds) != 2 or not all(b.strip() for b in bounds):
+                raise PageSpecError(
+                    f"'{part}' is not a valid page range -- write it as start-end, e.g. 7-10."
+                )
+            lo, hi = (_page_int(b, part) for b in bounds)
+            if lo > hi:
+                raise PageSpecError(
+                    f"page range '{part}' runs backwards -- write it as {hi}-{lo}."
+                )
+            if hi > MAX_SELECTABLE_PAGE:
+                raise PageSpecError(
+                    f"page range '{part}' exceeds the maximum selectable page "
+                    f"({MAX_SELECTABLE_PAGE})."
+                )
+            pages.update(range(lo, hi + 1))
         else:
-            pages.add(int(part))
+            pages.add(_page_int(part, part))
+
+    if not pages:
+        raise PageSpecError(
+            f"page selector '{spec}' does not select any pages -- "
+            f"use something like 1,3,7-10."
+        )
     return pages
+
+
+def _page_int(token: str, context: str) -> int:
+    token = token.strip()
+    try:
+        value = int(token)
+    except ValueError:
+        raise PageSpecError(
+            f"'{context}' is not a valid page selector -- '{token}' is not a page number."
+        ) from None
+    if value < 1:
+        raise PageSpecError(f"page numbers start at 1, but '{context}' asks for {value}.")
+    if value > MAX_SELECTABLE_PAGE:
+        raise PageSpecError(
+            f"'{context}' exceeds the maximum selectable page ({MAX_SELECTABLE_PAGE})."
+        )
+    return value
 
 
 def page_count(pdf_path: str) -> int:

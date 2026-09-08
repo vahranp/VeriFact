@@ -97,3 +97,45 @@ class TestChunkPage:
         from app.config import MAX_CHUNK_CHARS
         chunks = chunk_page(52, "y" * (MAX_CHUNK_CHARS * 2))
         assert {c.page_number for c in chunks} == {52}
+
+
+class TestPageSpecValidation:
+    """A malformed page selector must be rejected with an explanation, not
+    crash deep inside int().
+
+    Real failure: uploading with pages="24-24-24" passed the API, created a
+    document row, queued a background job, and then died asynchronously
+    with "invalid literal for int() with base 10: '24-24'". The upload
+    returned a 500 and left a crashed job behind.
+    """
+
+    import pytest as _pytest
+
+    @_pytest.mark.parametrize("spec", ["1,3,7-10", "7-10", "5", " 2 , 4 "])
+    def test_valid_selectors_parse(self, spec):
+        from app.pdf_extract import parse_page_spec
+        assert parse_page_spec(spec)
+
+    @_pytest.mark.parametrize("spec,fragment", [
+        ("24-24-24", "start-end"),
+        ("10-3", "backwards"),
+        ("1-100000", "maximum selectable"),
+        ("abc", "not a page number"),
+        ("", "does not select any pages"),
+        ("0", "page numbers start at 1"),
+        ("-5", "not a valid page range"),
+    ])
+    def test_malformed_selectors_are_rejected_with_a_message(self, spec, fragment):
+        from app.pdf_extract import parse_page_spec, PageSpecError
+        with self._pytest.raises(PageSpecError) as exc:
+            parse_page_spec(spec)
+        assert fragment in str(exc.value)
+
+    def test_error_is_a_valueerror_subclass(self):
+        """Callers that already catch ValueError keep working."""
+        from app.pdf_extract import PageSpecError
+        assert issubclass(PageSpecError, ValueError)
+
+    def test_ranges_are_inclusive_of_both_ends(self):
+        from app.pdf_extract import parse_page_spec
+        assert parse_page_spec("7-10") == {7, 8, 9, 10}

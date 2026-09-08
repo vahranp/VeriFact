@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app import db
 from app.cache import hash_file
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
-from app.pdf_extract import page_count, parse_page_spec
+from app.pdf_extract import PageSpecError, page_count, parse_page_spec
 from app.pipeline import process_document
 
 app = FastAPI(title="Fact Knowledge Layer")
@@ -66,6 +66,20 @@ async def upload_document(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported.")
 
+    # Validate the page selector BEFORE writing a file, creating a document
+    # row, or queueing a job. Previously this was only parsed further down,
+    # after the background task had already been scheduled -- so a selector
+    # like "24-24-24" returned a 500 *and* left a job running that died
+    # asynchronously with an opaque int() error. Cheapest check first.
+    selected_pages: Optional[set[int]] = None
+    if pages:
+        try:
+            selected_pages = parse_page_spec(pages)
+        except PageSpecError as exc:
+            raise HTTPException(400, str(exc))
+    if max_pages is not None and max_pages < 1:
+        raise HTTPException(400, f"max_pages must be at least 1, got {max_pages}.")
+
     safe_name = f"{uuid.uuid4().hex}_{Path(file.filename).name}"
     dest = UPLOAD_DIR / safe_name
     with dest.open("wb") as f:
@@ -113,8 +127,8 @@ async def upload_document(
     # a legitimate thing to ask for, but on a local model it can take hours,
     # and previously nothing said so until you noticed it still running.
     pages_to_process = total_pages
-    if pages:
-        pages_to_process = len(parse_page_spec(pages) & set(range(1, total_pages + 1)))
+    if selected_pages is not None:
+        pages_to_process = len(selected_pages & set(range(1, total_pages + 1)))
     elif max_pages is not None:
         pages_to_process = min(max_pages, total_pages)
 

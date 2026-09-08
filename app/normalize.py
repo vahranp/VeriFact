@@ -60,10 +60,35 @@ class Normalized:
     original_unit: str
 
 
+def _alias_pattern(sym: str) -> str:
+    """A currency alias must not match inside a longer word. Guarding only
+    the right-hand edge is not enough, and this bit for real: "rs" -> "inr"
+    with a trailing \\b alone rewrote "hours" to "houinr", "years" to
+    "yeainr" and "workers" to "workeinr", quietly corrupting the base unit
+    of every non-currency quantity whose name happens to end in "rs".
+
+    Boundaries are applied per edge and only where the edge character is
+    alphanumeric, so symbol aliases ("₹", "$") -- which have no word
+    boundary of their own -- still match tight against digits and letters.
+    """
+    escaped = re.escape(sym)
+    left = r"(?<![0-9a-z])" if sym[:1].isalnum() else ""
+    right = r"(?![0-9a-z])" if sym[-1:].isalnum() else ""
+    return left + escaped + right
+
+
+# Longest first, so "rs." is considered before "rs" and can't be left as a
+# stray "inr." fragment.
+_ALIAS_PATTERNS = [
+    (re.compile(_alias_pattern(sym)), canon)
+    for sym, canon in sorted(_CURRENCY_ALIASES.items(), key=lambda kv: -len(kv[0]))
+]
+
+
 def _clean_token(s: str) -> str:
     s = s.strip().lower()
-    for sym, canon in _CURRENCY_ALIASES.items():
-        s = re.sub(re.escape(sym) + r"\b" if sym.isalpha() else re.escape(sym), canon, s)
+    for pattern, canon in _ALIAS_PATTERNS:
+        s = pattern.sub(canon, s)
     s = re.sub(r"[,\.]", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s

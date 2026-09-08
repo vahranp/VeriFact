@@ -204,3 +204,47 @@ class TestMetricPromptGuidance:
         """The specific line that caused the regression."""
         from app.relationships import SYSTEM_PROMPT_METRIC
         assert '"revenue from services"' not in SYSTEM_PROMPT_METRIC
+
+
+class TestCanonicalPairOrdering:
+    """The pair cache is order-independent by design, but the prompts label
+    the facts positionally and the model's explanation refers to those
+    labels. Without a canonical presentation order, a pair first judged as
+    (A, B) and later met as (B, A) is served a cached explanation whose
+    "FACT A" points at the wrong fact.
+    """
+
+    def test_swapping_the_arguments_does_not_change_the_cache_key(self):
+        from app.cache import hash_fact_pair
+        a = {"subject": "X", "attribute": "revenue", "statement": "X revenue was 10"}
+        b = {"subject": "X", "attribute": "revenue", "statement": "X revenue was 20"}
+        assert hash_fact_pair(a, b) == hash_fact_pair(b, a)
+
+    def test_canonical_order_is_stable_and_opposite_for_swapped_inputs(self):
+        from app.cache import canonical_pair_order
+        a = {"subject": "X", "attribute": "revenue", "statement": "aaa"}
+        b = {"subject": "X", "attribute": "revenue", "statement": "bbb"}
+        assert canonical_pair_order(a, b) != canonical_pair_order(b, a)
+        # and it is deterministic, not dependent on call order
+        assert canonical_pair_order(a, b) == canonical_pair_order(a, b)
+
+    def test_identical_facts_are_never_reported_as_needing_a_swap(self):
+        from app.cache import canonical_pair_order
+        f = {"subject": "X", "attribute": "revenue", "statement": "same"}
+        assert canonical_pair_order(f, dict(f)) is False
+
+    def test_classify_pair_reports_whether_it_swapped(self, no_cache, monkeypatch):
+        """The caller needs this to persist the relationship in the order
+        the explanation describes."""
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "corroborates",
+            "explanation": "x", "confidence": 0.9,
+        })
+        low = {"subject": "X", "attribute": "r", "statement": "aaa", "page_number": 1, "quote": "q"}
+        high = {"subject": "X", "attribute": "r", "statement": "bbb", "page_number": 1, "quote": "q"}
+
+        _, _ = R.classify_pair(low, "d", high, "d")
+        forward = R.classify_pair(low, "d", high, "d")[0]["_meta"]["swapped"]
+        reverse = R.classify_pair(high, "d", low, "d")[0]["_meta"]["swapped"]
+        assert forward != reverse, "exactly one presentation order must be swapped"
