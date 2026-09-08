@@ -487,9 +487,6 @@ a catch-all.
   (`scripts/bench_candidates.py`): 3 pairs of recall for 3× the LLM calls. Re-litigating a measured
   decision without new evidence would violate this project's own "optimize only what's measured"
   rule; only the documentation's overclaim about how far the hybrid signals reach was fixed.
-- **A DB-level unique constraint on relationships.** A real, narrow gap (concurrent duplicate
-  inserts) not currently manifesting as a bug, but adding a migration against a live database whose
-  existing-duplicate state wasn't verified was judged riskier than the gap it would close.
 - **A hand-labelled precision benchmark, a vector index, a durable job queue, OCR, multi-agent
   orchestration.** All out of scope per the brief's own anti-overengineering instruction and this
   project's existing, already-honest limitations list — none of these are new omissions introduced
@@ -498,3 +495,45 @@ a catch-all.
   0.73`). The adjudication `checks` trace (categorical: which rule fired, what each computed
   verdict was) serves the same "don't collapse uncertainty into one number" goal without inventing
   false numerical precision the brief explicitly warns against.
+
+## 14. A follow-up round: what changed after this document was first written
+
+A later review repeated most of §13's already-declined proposals (a `ClaimIdentity` object, a
+7-value relationship taxonomy splitting exact vs. semantic equality, bounding-box evidence
+storage, true multi-channel union candidate retrieval, OCR, a 50–100-pair hand-labelled
+benchmark) against this same, by-then-submitted codebase. None of those were revisited without
+new evidence — see §13, whose reasoning didn't change. Two items **did** change, because the
+situation that justified declining them changed:
+
+- **DB-level relationship uniqueness.** §13 declined this because the live database's
+  existing-duplicate state hadn't been verified. It has been since: `SELECT fact_id_a, fact_id_b,
+  COUNT(*) FROM relationships GROUP BY 1, 2 HAVING COUNT(*) > 1` (and the same check on the
+  unordered pair) both returned zero rows against the real corpus. With that risk closed,
+  `app/db.py` gained `fact_low_id`/`fact_high_id` columns (order-independent: `min`/`max` of the
+  pair, so `(a, b)` and `(b, a)` collide) and a `UNIQUE INDEX` on them, backfilled for all existing
+  rows via the same additive `_ensure_column` pattern used everywhere else in this schema.
+  `insert_relationship` now catches the resulting `sqlite3.IntegrityError` on a genuine
+  concurrent-insert race and returns the winning row's id instead of raising -- the caller's
+  computed judgment becomes redundant, not invalid, so a 500 would be the wrong response.
+  `relationship_exists()` (checked before a judgment is even computed) is unchanged and still the
+  first line of defense; the constraint is the backstop for the race window between that check and
+  the insert, which is exactly the gap application-level checks alone can't close. Tests:
+  `tests/test_db.py`.
+- **Prompt injection defense.** Genuinely missing, not previously evaluated: PDF text is untrusted
+  input, and nothing told the model to treat it as such. The extraction system prompt
+  (`app/fact_extraction.py`) and both relationship prompts (`app/relationships.py`) now explicitly
+  state that document/fact text may contain text crafted to look like an instruction and must be
+  treated as data to extract-from-or-judge, never as a command. The structural defense was already
+  correct (chunk text has only ever been placed in the user message, never concatenated into the
+  system prompt), so this closes the instructional gap rather than a structural one.
+  `tests/test_fact_extraction.py::TestPromptInjectionCannotEscapeTheUserContent` asserts that
+  property directly: the system prompt sent to the model is byte-identical to the fixed constant
+  regardless of chunk content, and injected text lands only inside the delimited page-text section
+  of the user message.
+
+Everything else proposed in that follow-up round is declined for the same reasons §13 already
+gives, now with one addition: rewriting the fact model around a `ClaimIdentity` object, splitting
+`corroborates` into exact/semantic variants, and replacing candidate retrieval would each touch
+nearly every module in `app/` at once, on a codebase that was already feature-complete and
+submitted -- exactly what this project's very first instruction said not to do ("do NOT redesign
+the entire project from scratch. The current architecture is already strong").

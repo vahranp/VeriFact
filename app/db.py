@@ -165,6 +165,25 @@ def init_db():
         # same flattened-grid text that originally caused row-label
         # extraction errors, with no structural help.
         _ensure_column(conn, "facts", "table_context", "TEXT")
+        # Canonical (order-independent) pair key so a DB-level constraint --
+        # not just the application's relationship_exists() check before
+        # insert -- rejects a duplicate relationship between the same two
+        # facts. min/max rather than a UNIQUE(fact_id_a, fact_id_b) directly
+        # because (a, b) and (b, a) must collide: a relationship has no
+        # inherent direction. Backfilled once for pre-existing rows; new
+        # rows get it from insert_relationship() below.
+        _ensure_column(conn, "relationships", "fact_low_id", "INTEGER")
+        _ensure_column(conn, "relationships", "fact_high_id", "INTEGER")
+        conn.execute(
+            """UPDATE relationships
+               SET fact_low_id = MIN(fact_id_a, fact_id_b),
+                   fact_high_id = MAX(fact_id_a, fact_id_b)
+               WHERE fact_low_id IS NULL"""
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_pair_unique "
+            "ON relationships(fact_low_id, fact_high_id)"
+        )
 
 
 # A job is declared orphaned by STALENESS, not by process identity.
@@ -439,20 +458,36 @@ def insert_relationship(fact_id_a: int, fact_id_b: int, relation_type: str, expl
                          decision_source: Optional[str] = None, llm_proposal: Optional[str] = None,
                          disagreement: bool = False, disagreement_reason: Optional[str] = None,
                          adjudication_checks: Optional[dict] = None) -> int:
+    """Inserts a relationship. The caller already checks relationship_exists()
+    first, but that check-then-insert has a race window between two workers;
+    idx_rel_pair_unique (see init_db) is the actual guarantee. On the rare
+    concurrent-duplicate hit, this returns the id of whichever row won
+    instead of raising -- the caller's job (compute a judgment) is already
+    done and its result is redundant, not invalid, so a 500 would be the
+    wrong response to a benign race."""
+    fact_low_id, fact_high_id = min(fact_id_a, fact_id_b), max(fact_id_a, fact_id_b)
     with get_conn() as conn:
-        cur = conn.execute(
-            """INSERT INTO relationships
-               (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-                confidence, similarity_score, candidate_reason, decision_source, llm_proposal,
-                disagreement, disagreement_reason, adjudication_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-             confidence, similarity_score, candidate_reason, decision_source, llm_proposal,
-             1 if disagreement else 0, disagreement_reason,
-             json.dumps(adjudication_checks) if adjudication_checks is not None else None,
-             time.time()),
-        )
-        return cur.lastrowid
+        try:
+            cur = conn.execute(
+                """INSERT INTO relationships
+                   (fact_id_a, fact_id_b, fact_low_id, fact_high_id, relation_type, explanation,
+                    reconciliation_context, confidence, similarity_score, candidate_reason,
+                    decision_source, llm_proposal, disagreement, disagreement_reason,
+                    adjudication_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (fact_id_a, fact_id_b, fact_low_id, fact_high_id, relation_type, explanation,
+                 reconciliation_context, confidence, similarity_score, candidate_reason,
+                 decision_source, llm_proposal, 1 if disagreement else 0, disagreement_reason,
+                 json.dumps(adjudication_checks) if adjudication_checks is not None else None,
+                 time.time()),
+            )
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            existing = conn.execute(
+                "SELECT id FROM relationships WHERE fact_low_id = ? AND fact_high_id = ?",
+                (fact_low_id, fact_high_id),
+            ).fetchone()
+            return existing["id"] if existing else None
 
 
 def relationship_exists(fact_id_a: int, fact_id_b: int) -> bool:

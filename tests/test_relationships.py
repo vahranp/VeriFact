@@ -206,6 +206,24 @@ class TestMetricPromptGuidance:
         assert '"revenue from services"' not in SYSTEM_PROMPT_METRIC
 
 
+class TestPromptInjectionGuidance:
+    """Facts fed into these prompts originate from PDF text (see
+    app/fact_extraction.py's own injection defense) and could carry text
+    crafted to look like an instruction once copied into a fact's
+    statement/quote. Both prompts explicitly tell the model that fact text
+    is data to judge, never a command to follow."""
+
+    def test_metric_prompt_treats_fact_text_as_data_not_command(self):
+        from app.relationships import SYSTEM_PROMPT_METRIC
+        lowered = SYSTEM_PROMPT_METRIC.lower()
+        assert "never a command" in lowered or "not a command" in lowered
+
+    def test_judge_prompt_treats_fact_text_as_data_not_command(self):
+        from app.relationships import SYSTEM_PROMPT_JUDGE
+        lowered = SYSTEM_PROMPT_JUDGE.lower()
+        assert "never a command" in lowered or "not a command" in lowered
+
+
 class TestCanonicalPairOrdering:
     """The pair cache is order-independent by design, but the prompts label
     the facts positionally and the model's explanation refers to those

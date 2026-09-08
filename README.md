@@ -858,10 +858,6 @@ assumed:
   retriever was built and measured, then reverted: at most 3 additional pairs of recall for 3× the
   LLM calls. Re-litigating a measured decision without new evidence would violate this project's
   own "optimize only what's measured" rule.
-- **A DB-level unique constraint on relationships.** A real, narrow gap (a possible concurrent
-  duplicate insert) that isn't currently manifesting as a bug; adding a migration against a live
-  database whose existing-duplicate state wasn't verified was judged riskier than the gap it would
-  close.
 - **A hand-labelled precision benchmark, a vector index, a durable job queue, OCR, multi-agent
   orchestration.** All out of scope for a prototype at this stage — none of the assignment's
   "brownie point" extensions require them, and the existing limitations above are already honestly
