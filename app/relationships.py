@@ -19,6 +19,7 @@ in code (app/normalize.py) rather than asking it to convert crore to
 million itself -- removes both failure points from a single call.
 """
 import time
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app import db
@@ -211,6 +212,39 @@ def _validated(model, raw, default: dict) -> dict:
         return dict(default)
 
 
+# Evidence statuses (see app/evidence.py) under which a fact's value_numeric
+# should not be treated as trustworthy ground truth. Matches the identical
+# policy in app/arithmetic.py and app/coherence.py -- a fact missing
+# evidence_status entirely is "not yet assessed", not "known bad", and is
+# not included here.
+_UNVERIFIED_EVIDENCE = {"ungrounded", "quote_grounded"}
+
+
+def _unverified_value_caveat(fact_a: dict, fact_b: dict) -> Optional[str]:
+    """A caveat for the judge when either fact's value is not itself
+    evidenced -- the quote is missing, or circular (it just restates the
+    number rather than supporting it, e.g. quote="35.69%" for value
+    35.69%). The deterministic comparison above is only as trustworthy as
+    the values feeding it; without this, a confident "these agree to
+    0.006%" could be built on a number nothing ever confirmed."""
+    flagged = [
+        label for label, fact in (("Fact A", fact_a), ("Fact B", fact_b))
+        if fact.get("evidence_status") in _UNVERIFIED_EVIDENCE
+    ]
+    if not flagged:
+        return None
+    subjects = " and ".join(f"{label}'s" for label in flagged)
+    plural = len(flagged) > 1
+    noun = "values are not themselves evidenced" if plural else "value is not itself evidenced"
+    pronoun = "their quotes do" if plural else "its quote does"
+    return (
+        f"CAVEAT: {subjects} {noun} -- {pronoun} not clearly "
+        f"support the stated number{'s' if plural else ''}. Treat the comparison above with "
+        f"reduced confidence, and prefer \"uncertain\" over a confident "
+        f"corroborates/contradicts if this unverified value is the deciding factor."
+    )
+
+
 def _fact_block(label: str, fact: dict, document_name: str) -> str:
     return (
         f"{label}:\n"
@@ -326,18 +360,31 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
     period = compare_periods(fact_a.get("time_period"), fact_b.get("time_period"))
     scope = compare_scopes(fact_a.get("scope"), fact_b.get("scope"))
 
+    # The comparison above is only as trustworthy as the values feeding
+    # it. Audited in alongside the identical gap already fixed in
+    # app/arithmetic.py and app/coherence.py: an ungrounded or
+    # circular-quote fact's value_numeric has no more claim to being
+    # correct than any other unverified number, so a confident "these
+    # agree to 0.006%" built on one would be handing the judge a false
+    # sense of certainty rather than a real computation.
+    evidence_caveat = _unverified_value_caveat(fact_a, fact_b)
+
     # The context block needs to know whether the values actually agreed:
     # context explains a *difference*, so its guidance is only meaningful
-    # when there is one. See format_context_for_prompt.
+    # when there is one. An unverified value makes that agreement itself
+    # unreliable, same as magnitude_suspect already does.
     values_agree = (
         comparison.agree
-        if comparison.comparable and not comparison.magnitude_suspect
+        if comparison.comparable and not comparison.magnitude_suspect and not evidence_caveat
         else None
     )
-    comparison_line = "\n".join([
+    comparison_lines = [
         format_comparison_for_prompt(comparison),
         format_context_for_prompt(period, scope, values_agree),
-    ])
+    ]
+    if evidence_caveat:
+        comparison_lines.append(evidence_caveat)
+    comparison_line = "\n".join(comparison_lines)
     judge_result, judge_cached = classify_relation(fact_a, doc_a_name, fact_b, doc_b_name, comparison_line)
 
     result = dict(judge_result)

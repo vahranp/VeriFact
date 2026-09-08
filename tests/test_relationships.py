@@ -377,3 +377,103 @@ class TestContextReachesTheJudge:
         b = dict(_f("b"), time_period="FY2023-24")
         result, _ = R.classify_pair(a, "d", b, "d")
         assert result["_meta"]["period"] == "same"
+
+
+class TestUnverifiedEvidenceCaveat:
+    """Audited in alongside the identical gap already fixed in
+    app/arithmetic.py and app/coherence.py: the deterministic comparison
+    handed to the judge is only as trustworthy as the values feeding it.
+    An ungrounded or circular-quote fact's value_numeric has no more claim
+    to being correct than any other unverified number would."""
+
+    def test_unverified_evidence_reaches_the_prompt_as_a_caveat(self, no_cache, monkeypatch):
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "uncertain",
+                    "explanation": "x", "confidence": 0.5}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        a = dict(_f("a"), evidence_status="ungrounded")
+        b = dict(_f("b"), evidence_status="fact_validated")
+        R.classify_pair(a, "d", b, "d")
+        assert "CAVEAT" in seen["user"]
+        assert "not itself evidenced" in seen["user"]
+
+    def test_fully_verified_facts_carry_no_caveat(self, no_cache, monkeypatch):
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "corroborates",
+                    "explanation": "x", "confidence": 0.9}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        a = dict(_f("a"), evidence_status="fact_validated")
+        b = dict(_f("b"), evidence_status="fact_validated")
+        R.classify_pair(a, "d", b, "d")
+        assert "CAVEAT" not in seen["user"]
+
+    def test_missing_evidence_status_carries_no_caveat(self, no_cache, monkeypatch):
+        """No evidence_status field at all is "not yet assessed", not
+        "known bad" -- matching every other fixture in this file, none of
+        which set the field."""
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "corroborates",
+                    "explanation": "x", "confidence": 0.9}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        R.classify_pair(_f("a"), "d", _f("b"), "d")
+        assert "CAVEAT" not in seen["user"]
+
+    def test_an_unverified_agreement_does_not_assert_context_explains_nothing(self, no_cache, monkeypatch):
+        """values_agree must become unreliable (None) when evidence is
+        unverified, the same way magnitude_suspect already disables it --
+        otherwise the context block could confidently tell the judge "no
+        discrepancy to explain" based on an unconfirmed number."""
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "uncertain",
+                    "explanation": "x", "confidence": 0.5}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        a = dict(_f("a"), value_numeric=100.0, unit="INR million", evidence_status="ungrounded")
+        b = dict(_f("b"), value_numeric=100.0, unit="INR million", evidence_status="fact_validated")
+        R.classify_pair(a, "d", b, "d")
+        assert "no discrepancy for context to explain" not in seen["user"]
+
+    def test_the_caveat_changes_the_effective_comparison_line(self, no_cache, monkeypatch):
+        """comparison_line is part of classify_relation's cache key
+        (hash_text(..., comparison_line)), so a real difference in that
+        string is what stops a stale judgment made before evidence_status
+        existed from being silently served for a now-flagged pair."""
+        import app.relationships as R
+        seen = {}
+
+        def fake(model, system, user, **kw):
+            seen["user"] = user
+            return {"same_metric": True, "relation_type": "uncertain",
+                    "explanation": "x", "confidence": 0.5}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+
+        R.classify_pair(dict(_f("a"), evidence_status="ungrounded"), "d",
+                         dict(_f("b"), evidence_status="fact_validated"), "d")
+        flagged_prompt = seen["user"]
+
+        R.classify_pair(dict(_f("a"), evidence_status="fact_validated"), "d",
+                         dict(_f("b"), evidence_status="fact_validated"), "d")
+        clean_prompt = seen["user"]
+
+        assert flagged_prompt != clean_prompt
+        assert "CAVEAT" in flagged_prompt and "CAVEAT" not in clean_prompt
