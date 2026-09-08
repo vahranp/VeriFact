@@ -10,6 +10,7 @@ import re
 from app import db
 from app.cache import hash_text
 from app.evidence import check_evidence
+from app.normalize import parse_locale_number
 from app.schemas import validate_facts
 from app.config import EXTRACTION_MODEL, EXTRACTION_TIMEOUT_SECONDS
 from app.llm_client import chat_json, LLMError, LLMParseError
@@ -67,8 +68,15 @@ _NULLISH = {"null", "none", "n/a", "na", ""}
 # -- note the number sits *before* a trailing "%" and *then* the closing
 # paren, so the parenthesis check can't just look for the number
 # immediately followed by ")"), falling back to a plain signed number.
-_PAREN_NUMBER = re.compile(r"\(\s*-?[\d,]*\.?\d+\s*%?\s*\)")
-_PLAIN_NUMBER = re.compile(r"-?[\d,]*\.?\d+")
+#
+# Matches a full number token under EITHER separator convention: a run of
+# digit/dot/comma characters that starts and ends on a digit. The earlier
+# version of this pattern (`[\d,]*\.?\d+`, at most one dot) truncated a
+# European-style multi-group number like "12.345.678" at the first dot,
+# silently reading it as "12.345" -- wrong by three orders of magnitude,
+# with the rest of the digits discarded rather than flagged.
+_PAREN_NUMBER = re.compile(r"\(\s*-?\d[\d.,]*\d?\s*%?\s*\)")
+_PLAIN_NUMBER = re.compile(r"-?\d[\d.,]*\d?")
 
 
 def _numeric_fallback(value) -> float | None:
@@ -80,18 +88,14 @@ def _numeric_fallback(value) -> float | None:
     if paren_match:
         inner = _PLAIN_NUMBER.search(paren_match.group(0))
         if inner:
-            try:
-                return -abs(float(inner.group(0).replace(",", "")))
-            except ValueError:
-                pass
+            parsed = parse_locale_number(inner.group(0))
+            if parsed is not None:
+                return -abs(parsed)
 
     plain_match = _PLAIN_NUMBER.search(s)
     if not plain_match:
         return None
-    try:
-        return float(plain_match.group(0).replace(",", ""))
-    except ValueError:
-        return None
+    return parse_locale_number(plain_match.group(0))
 
 
 def _clean(value):

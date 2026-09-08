@@ -21,6 +21,74 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+
+def parse_locale_number(text) -> Optional[float]:
+    """Parses a numeric string that may use either the US/UK convention
+    (comma = thousands separator, dot = decimal point) or the
+    continental-European convention (dot = thousands, comma = decimal).
+
+    This project's other numeric parsing used to do a bare
+    `float(s.replace(",", ""))` everywhere, which is silently wrong for
+    real international documents: "1.234" means 1234 in Germany and 1.234
+    in the US, and a naive strip-the-comma parse gets the European case
+    wrong without any error to signal it. Worse, on a number with more
+    than one European thousands group ("12.345.678") the old parsing
+    regex only matched up to the first dot and truncated the rest.
+
+    Full generality is impossible from the string alone -- a single
+    separator used exactly once ("1,234" or "1.234") is genuinely
+    ambiguous with no surrounding context to resolve it. This resolves
+    every case that IS unambiguous and only falls back to a fixed
+    convention for the case that isn't:
+
+      "1,234.56"      -> 1234.56   (US/UK, unambiguous: two different
+      "1.234,56"      -> 1234.56    separators present, so whichever comes
+                                     LAST is the decimal point in both
+                                     conventions)
+      "12,345,678"    -> 12345678.0 (repeated separator: a number has at
+      "12.345.678"    -> 12345678.0  most one decimal point, so a REPEATED
+                                      comma or dot can only be a thousands
+                                      grouping, regardless of locale)
+      "1,234"         -> 1234.0    (single separator used once: genuinely
+      "1.234"         -> 1.234      ambiguous. Defaults to the US/UK
+                                     reading -- comma=thousands, dot=
+                                     decimal -- since that convention is
+                                     what this project's target documents
+                                     overwhelmingly use; this is a
+                                     deliberate default, not an oversight.)
+
+    Returns None for anything that still doesn't parse, rather than
+    guessing further -- consistent with normalize_unit's refusal to guess
+    an unrecognized unit.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+
+    negative = s.startswith("-")
+    s = s.lstrip("+-")
+
+    dots, commas = s.count("."), s.count(",")
+    if dots and commas:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")   # European: 1.234,56
+        else:
+            s = s.replace(",", "")                     # US/UK: 1,234.56
+    elif commas > 1:
+        s = s.replace(",", "")                          # 12,345,678
+    elif dots > 1:
+        s = s.replace(".", "")                          # 12.345.678
+    else:
+        s = s.replace(",", "")                          # ambiguous default
+
+    try:
+        value = float(s)
+    except ValueError:
+        return None
+    return -value if negative else value
+
 # Multiplicative scale words. Indian numbering (crore, lakh) and
 # international numbering (million, billion) are both included because the
 # starter documents mix both -- but a "scale word" is just a multiplier

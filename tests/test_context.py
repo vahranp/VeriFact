@@ -185,3 +185,55 @@ class TestDomainNeutrality:
 
     def test_a_non_financial_scope_contrast_works(self):
         assert compare_scopes("estimated", "actual").relation == DIFFERENT
+
+
+class TestHalfYearParsing:
+    """Real gap found in a generalization audit: H1/H2 were not parsed at
+    all, so both halves of a fiscal year collapsed to just their shared
+    year and compared as SAME -- the exact failure this module exists to
+    prevent for quarters, one granularity coarser. A seasonal business's
+    H1 and H2 can legitimately differ a great deal; without this, that
+    difference would have read as an unexplained (and false) contradiction.
+    """
+
+    @pytest.mark.parametrize("text,half,year", [
+        ("H1 2024", 1, 2024), ("H2 2024", 2, 2024),
+        ("H1 FY24", 1, 2024), ("H2FY2024", 2, 2024),
+        ("1H24", 1, 2024), ("2H2024", 2, 2024), ("2HFY25", 2, 2025),
+        ("HY1 2024", 1, 2024), ("HY2 FY24", 2, 2024),
+    ])
+    def test_half_year_forms_parse(self, text, half, year):
+        p = parse_period(text)
+        assert (p.half, p.year) == (half, year)
+
+    @pytest.mark.parametrize("text,half", [
+        ("first half of 2024", 1), ("second half of 2024", 2),
+        ("1st half 2024", 1), ("2nd half 2024", 2),
+    ])
+    def test_half_year_word_forms_parse(self, text, half):
+        p = parse_period(text)
+        assert p.half == half and p.year == 2024
+
+
+class TestHalfYearComparison:
+    def test_the_same_half_written_two_ways_is_same(self):
+        assert compare_periods("H1 2024", "1H FY24").relation == SAME
+
+    def test_different_halves_of_one_year_are_different(self):
+        """The real bug: these used to compare SAME because both parsed
+        down to just the year 2024, losing which half entirely."""
+        result = compare_periods("H1 2024", "H2 2024")
+        assert result.relation == DIFFERENT and result.distinguishing
+
+    def test_a_half_against_its_own_year_overlaps(self):
+        assert compare_periods("H1 2024", "2024").relation == OVERLAPPING
+
+    def test_a_quarter_against_a_half_overlaps_rather_than_matching(self):
+        """Different granularities of the same year -- neither same nor
+        cleanly different, since Q1 sits inside H1."""
+        assert compare_periods("Q1 2024", "H1 2024").relation == OVERLAPPING
+
+    def test_quarters_are_unaffected_by_the_generalization(self):
+        assert compare_periods("Q1 2024", "Q2 2024").relation == DIFFERENT
+        assert compare_periods("Q1 FY25", "FY25").relation == OVERLAPPING
+        assert compare_periods("Q1 FY25", "Q1 2025").relation == SAME

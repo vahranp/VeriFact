@@ -72,9 +72,10 @@ class Period:
     """
 
     label: str
-    kind: str               # "fiscal_year" | "calendar_year" | "quarter" | "as_of" | "relative"
+    kind: str               # "fiscal_year" | "calendar_year" | "quarter" | "half_year" | "as_of" | "relative"
     year: Optional[int] = None
     quarter: Optional[int] = None
+    half: Optional[int] = None  # 1 or 2, for half-year reporting (H1/H2)
     month: Optional[int] = None
     day: Optional[int] = None
     # A fiscal year written "2023-24" spans two calendar years; kept so a
@@ -85,6 +86,8 @@ class Period:
     def describe(self) -> str:
         if self.kind == "quarter":
             return f"Q{self.quarter} {self.year}"
+        if self.kind == "half_year":
+            return f"H{self.half} {self.year}" if self.year else f"H{self.half}"
         if self.kind == "as_of":
             return f"as of {self.year}-{self.month:02d}-{self.day:02d}" if self.day else f"as of {self.year}-{self.month:02d}"
         if self.kind == "relative":
@@ -124,6 +127,32 @@ def parse_period(text: Optional[str]) -> Optional[Period]:
             return Period(label=raw, kind="quarter", quarter=int(q.group(1)),
                           year=_two_digit_year(int(year.group(1))))
         return Period(label=raw, kind="quarter", quarter=int(q.group(1)))
+
+    # H1 2024 / H1 FY24 / HY2 2024 / 1H24 / 2HFY25 / first half of 2024.
+    # Missed entirely before this: both halves collapsed to just their
+    # shared year, so H1 and H2 of the same year compared as SAME --
+    # exactly the failure this module exists to prevent for quarters,
+    # just one granularity coarser. A seasonal business's H1 and H2 can
+    # legitimately differ a great deal; without this, that legitimate
+    # difference had no way to be recognized as expected and would read
+    # as an unexplained (and false) contradiction.
+    #
+    # Two regexes because the half marker can come before or after its
+    # digit ("H1" vs "1H"), and in the compact form the year runs directly
+    # against the letter with no boundary between them ("1H24") -- a
+    # single \bh...\b-style pattern can't match both orderings safely.
+    half_prefix = re.search(r"\bhy?([12])\s*(?:fy)?\s*(\d{2,4})\b", s)
+    half_suffix = None if half_prefix else re.search(r"\b([12])h\s*(?:fy)?\s*(\d{2,4})\b", s)
+    half_match = half_prefix or half_suffix
+    if half_match:
+        return Period(label=raw, kind="half_year", half=int(half_match.group(1)),
+                      year=_two_digit_year(int(half_match.group(2))))
+    for phrase, half_num in (("first half", 1), ("second half", 2),
+                              ("1st half", 1), ("2nd half", 2)):
+        if phrase in s:
+            year = re.search(r"\b(19|20)(\d{2})\b", s)
+            return Period(label=raw, kind="half_year", half=half_num,
+                          year=int(year.group(0)) if year else None)
 
     # "as of March 31, 2024" / "as at 31 March 2024" / "ended 31.03.2024"
     as_of = re.search(
@@ -175,6 +204,19 @@ class Comparison:
         return self.relation == DIFFERENT
 
 
+def _subdivision(p: Period) -> Optional[tuple]:
+    """(kind, number) for a period that is a fraction of a year, or None
+    for a period that covers the whole year (or isn't year-bound at all).
+    The shared shape is what lets compare_periods treat quarters and
+    halves -- and any future subdivision -- with one rule instead of a
+    copy-pasted special case per granularity."""
+    if p.kind == "quarter" and p.quarter is not None:
+        return ("quarter", p.quarter)
+    if p.kind == "half_year" and p.half is not None:
+        return ("half_year", p.half)
+    return None
+
+
 def compare_periods(a: Optional[str], b: Optional[str]) -> Comparison:
     """Do these two period strings describe the same reporting period?"""
     pa, pb = parse_period(a), parse_period(b)
@@ -198,17 +240,25 @@ def compare_periods(a: Optional[str], b: Optional[str]) -> Comparison:
     if pa.year != pb.year:
         return Comparison(DIFFERENT, f"different periods: {pa.describe()} vs {pb.describe()}")
 
-    # Same year, but a quarter is not its own annual figure.
-    if pa.kind == "quarter" or pb.kind == "quarter":
-        if pa.quarter is not None and pb.quarter is not None:
-            if pa.quarter == pb.quarter:
+    # Same year, but a quarter or half is not its own annual figure --
+    # generalized so quarters and halves are handled by one rule rather
+    # than duplicating this logic per granularity as new ones are added.
+    sub_a, sub_b = _subdivision(pa), _subdivision(pb)
+    if sub_a is not None or sub_b is not None:
+        if sub_a is not None and sub_b is not None:
+            if sub_a == sub_b:
                 return Comparison(SAME, f"same period: {pa.describe()}")
-            return Comparison(DIFFERENT, f"different quarters: {pa.describe()} vs {pb.describe()}")
+            if sub_a[0] == sub_b[0]:
+                label = sub_a[0].replace("_", "-")
+                return Comparison(DIFFERENT, f"different {label}s: {pa.describe()} vs {pb.describe()}")
+        # Either mismatched granularities (a quarter against a half) or
+        # one subdivision against the whole year -- in both cases the
+        # smaller window sits inside the larger one, so a numeric gap is
+        # expected rather than a genuine conflict.
         return Comparison(
             OVERLAPPING,
-            f"one is a quarter and the other covers the year ({pa.describe()} vs "
-            f"{pb.describe()}) -- the shorter falls inside the longer, so the "
-            f"figures are not expected to match",
+            f"{pa.describe()} and {pb.describe()} are different-sized slices of the year "
+            f"-- the smaller falls inside the larger, so the figures are not expected to match",
         )
 
     # A fiscal year and a calendar year sharing a label overlap but are not

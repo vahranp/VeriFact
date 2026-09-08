@@ -204,3 +204,98 @@ class TestCurrencyAliasBoundaries:
         cmp = compare_values(8142.0, "INR Crore", 81415.38, "INR million")
         assert cmp.comparable and cmp.agree
         assert cmp.diff_pct < 0.01
+
+
+class TestParseLocaleNumber:
+    """A bare `float(s.replace(",", ""))` -- what this project used to do
+    in two separate places -- is silently wrong for a real class of
+    documents: European-formatted numbers, where "." is the thousands
+    separator and "," is the decimal point. "1.234" means 1234 in Germany
+    and 1.234 in the US. Full disambiguation from the string alone is
+    impossible for a single separator used once, but every case with two
+    different separators, or a repeated separator, IS unambiguous -- and
+    the old code got those wrong too.
+    """
+    from app.normalize import parse_locale_number as _parse
+    _parse = staticmethod(_parse)
+
+    def test_us_uk_convention_with_thousands_and_decimal(self):
+        assert self._parse("1,234.56") == 1234.56
+
+    def test_european_convention_with_thousands_and_decimal(self):
+        assert self._parse("1.234,56") == 1234.56
+
+    def test_repeated_comma_is_unambiguously_thousands_regardless_of_locale(self):
+        assert self._parse("12,345,678") == 12345678.0
+
+    def test_repeated_dot_is_unambiguously_thousands_regardless_of_locale(self):
+        """The real bug this fixes: the old regex only matched up to the
+        FIRST dot, silently truncating this to 12.345 -- wrong by three
+        orders of magnitude, with the rest of the digits just dropped."""
+        assert self._parse("12.345.678") == 12345678.0
+
+    def test_multi_group_us_convention_with_decimal(self):
+        assert self._parse("12,345,678.90") == 12345678.90
+
+    def test_multi_group_european_convention_with_decimal(self):
+        assert self._parse("12.345.678,90") == 12345678.90
+
+    def test_ambiguous_single_comma_defaults_to_us_uk_thousands(self):
+        """Genuinely ambiguous without more context. The default matches
+        this project's target documents, and is documented as a
+        deliberate choice, not an oversight."""
+        assert self._parse("1,234") == 1234.0
+
+    def test_ambiguous_single_dot_defaults_to_decimal_point(self):
+        assert self._parse("1.234") == 1.234
+
+    def test_negative_numbers(self):
+        assert self._parse("-1.234,56") == -1234.56
+        assert self._parse("-1,234.56") == -1234.56
+
+    def test_a_plain_integer_string(self):
+        assert self._parse("452") == 452.0
+
+    def test_zero(self):
+        assert self._parse("0") == 0.0
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", "abc", "1.2.3,4,5"])
+    def test_unparseable_input_returns_none_rather_than_guessing(self, bad):
+        assert self._parse(bad) is None
+
+
+class TestNumericFallbackHandlesBothLocales:
+    """fact_extraction._numeric_fallback is the model's safety net when it
+    leaves value_numeric null -- it has to parse whatever locale the
+    source document actually used, not just the one the starter documents
+    happened to use."""
+
+    def test_a_european_formatted_value(self):
+        from app.fact_extraction import _numeric_fallback
+        assert _numeric_fallback("1.234,56") == 1234.56
+
+    def test_a_multi_group_european_value_is_not_truncated(self):
+        from app.fact_extraction import _numeric_fallback
+        assert _numeric_fallback("EUR 12.345.678,90 million") == 12345678.90
+
+    def test_a_parenthesized_european_negative(self):
+        from app.fact_extraction import _numeric_fallback
+        assert _numeric_fallback("(1.234,56)") == -1234.56
+
+    def test_the_us_uk_cases_that_already_worked_still_work(self):
+        from app.fact_extraction import _numeric_fallback
+        assert _numeric_fallback("8,142") == 8142.0
+        assert _numeric_fallback("(452)") == -452.0
+        assert _numeric_fallback("12.7%") == 12.7
+
+
+class TestSchemaCoercionHandlesBothLocales:
+    def test_a_european_formatted_string_from_the_model(self):
+        from app.schemas import ExtractedFact
+        fact = ExtractedFact(statement="s", quote="q", value_numeric="1.234,56")
+        assert fact.value_numeric == 1234.56
+
+    def test_a_us_uk_formatted_string_from_the_model_still_works(self):
+        from app.schemas import ExtractedFact
+        fact = ExtractedFact(statement="s", quote="q", value_numeric="1,234.56")
+        assert fact.value_numeric == 1234.56

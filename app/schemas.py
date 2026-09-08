@@ -18,6 +18,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ValidationError, field_validator
 
+from app.normalize import parse_locale_number
+
 _NULLISH = {"null", "none", "n/a", "na", "-", ""}
 
 RelationType = Literal["corroborates", "contradicts", "reconciled", "unrelated", "uncertain"]
@@ -64,14 +66,16 @@ class ExtractedFact(BaseModel):
         """Models return numbers as strings often enough that rejecting
         them outright would throw away good facts. Anything that isn't a
         real number becomes None rather than failing the whole fact --
-        app/fact_extraction.py then falls back to parsing `value`."""
+        app/fact_extraction.py then falls back to parsing `value`.
+
+        Routed through parse_locale_number rather than a bare
+        `float(v.replace(",", ""))` so a European-formatted string
+        ("1.234,56") is read correctly instead of silently misparsed --
+        see app/normalize.py for why a plain comma-strip gets that wrong."""
         v = _nullish_to_none(v)
         if v is None or isinstance(v, (int, float)):
             return v
-        try:
-            return float(str(v).replace(",", "").strip())
-        except (TypeError, ValueError):
-            return None
+        return parse_locale_number(v)
 
     @field_validator("confidence", mode="before")
     @classmethod
