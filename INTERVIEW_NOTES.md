@@ -299,15 +299,19 @@ deliberately harsher than the README, which states limitations plainly but doesn
 | Correctness of the hard part | 8 | Case 1 (corroboration across units) is verified fixed end-to-end. Case 2's root cause was found and fixed at the extraction layer, but the specific pair is still blocked by a stale fact from before that fix. |
 | Engineering judgment | 9 | Three components were built, measured, and rejected or reverted. Profiling preceded optimization. The measured negative results are documented as prominently as the wins. |
 | Generalization | 7 | Audited clean of document-specific logic, and the mechanisms are structural rather than rule-based. But it hasn't been run end-to-end on a genuinely different document, so this rests on design argument plus targeted tests. |
-| Testing | 8 | 148 tests, LLM mocked, no Ollama needed to run them. Real-data testing caught defects the synthetic fixtures missed — and those became regression tests. Missing: fixture-based end-to-end tests of the four required cases. |
+| Testing | 9 | 226 tests, LLM mocked, no Ollama needed. Real-data testing caught defects synthetic fixtures missed, and each became a regression test. Missing: fixture-based end-to-end tests of the four required cases. |
 | Performance | 8 | 20–30 min → ~4 min on a representative page, with the profile that justified each change. Full-document ingestion on dense tables is still slow on local inference. |
-| Precision of results | 8 | Audited corpus-wide: 490 → 348 relationships, 142 false positives removed, 33 relabelled — all 33 toward the more careful label, none away. Surviving contradictions are ones a reviewer would want (including a transposed pair of director DINs). Not yet checked against a human-labelled ground truth. |
+| Precision of results | 8 | Audited corpus-wide: 490 → 348, 142 false positives removed, 33 relabelled — all toward the more careful label. Graph coherence then *proved* 25 remaining errors exist (12.8% of closed triangles) without any ground truth. Known-imperfect and measurably so, which is the honest position. |
 | Documentation | 9 | README leads with a diagram and the two decisions that matter; PERFORMANCE.md carries the numbers and the failures; this file covers the questions. |
-| **Overall** | **8** | Strong engineering process and honest reporting; the remaining gap is that precision is verified on one document, not across the corpus. |
+| **Overall** | **8.5** | Strong process, honest reporting, and two mechanisms (arithmetic identities, graph transitivity) that validate the model's work without a ground-truth set. The remaining gap is that no human has labelled a sample to convert those self-proofs into a true precision number. |
 
 ### Open issues, by severity
 
 **BLOCKER** — none. The system runs end to end and produces all four required case types.
+
+**PROVEN, QUANTIFIED** — graph coherence establishes that 25 of 196 closed triangles are
+logically impossible, implicating 62 edges. This is not a suspicion; at least one judgment per
+violating triangle is wrong. The mechanism now reports them; it does not yet repair them.
 
 **HIGH**
 - Precision is measured by *self-consistency* — re-judging under the corrected prompt — not
