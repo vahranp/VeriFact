@@ -404,3 +404,13 @@ h3.sec { font-size: 13px; font-weight: 650; letter-spacing: .02em; text-transfor
 @media (prefers-color-scheme: dark) {
   .badge.b-uncertain { background: rgba(71,85,105,.25); color: #cbd5e1; border-color: #475569; }
 }
+
+/* Value / period / scope shown inline on each side of a relationship, so
+   the comparison being made is visible without opening the Facts tab. */
+.fmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 8px 0 9px; }
+.fv { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 13px;
+  font-weight: 650; color: var(--ink); }
+.ftag { font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; padding: 2px 7px;
+  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--ink-2); }
+.gstat { margin-top: 9px; }
+.gstat .badge { font-size: 10.5px; }

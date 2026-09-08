@@ -590,10 +590,20 @@ function delta(a, b) {
 }
 
 function relCard(r) {
+  // Evidence is the point of the system, so each side of a relationship
+  // carries its own value, source link and grounding verdict -- a reviewer
+  // should never have to open the Facts tab to judge whether a claim is
+  // supported.
   const box = (f) => `<div class="fbox">
     <a class="pill" href="${pdfLink(f.document_id, f.page_number)}" target="_blank">${I.file}${esc(docName(f.document_name))} <span class="small">(${esc(docScope(docById(f.document_id)))})</span> · p.${f.page_number}</a>
     <div class="st">${esc(f.statement)}</div>
-    <div class="quote">"${esc(f.quote.slice(0, 190))}${f.quote.length > 190 ? "…" : ""}"</div></div>`;
+    ${f.value != null || f.time_period || f.scope ? `<div class="fmeta">
+      ${f.value != null ? `<span class="fv">${esc(f.value)}${f.unit ? ` <span class="small">${esc(f.unit)}</span>` : ""}</span>` : ""}
+      ${f.time_period ? `<span class="ftag">${esc(f.time_period)}</span>` : ""}
+      ${f.scope ? `<span class="ftag">${esc(f.scope)}</span>` : ""}
+    </div>` : ""}
+    <div class="quote ${f.evidence_status === "fact_validated" ? "" : "bad"}">"${esc(f.quote.slice(0, 190))}${f.quote.length > 190 ? "…" : ""}"</div>
+    <div class="gstat">${evidenceBadge(f)}</div></div>`;
   return `<div class="rcard rise">
     <div class="rcard-h">
       <span class="badge b-${r.relation_type}"><span style="display:flex">${RI[r.relation_type] || ""}</span>${r.relation_type}</span>

@@ -141,6 +141,49 @@ def init_db():
         # byte-identical upload is only valid while it still matches.
         _ensure_column(conn, "documents", "pipeline_fingerprint", "TEXT")
 
+    _fail_orphaned_jobs()
+
+
+# The orphan sweep must run exactly once per process, at startup. init_db()
+# is also called from tests and could in principle be called again while a
+# job is genuinely in flight -- sweeping then would kill a live job, which
+# is precisely the failure it exists to clean up after.
+_ORPHAN_SWEEP_DONE = False
+
+
+def _fail_orphaned_jobs():
+    """Marks documents left mid-processing by a previous run as failed.
+
+    Ingestion runs as a FastAPI BackgroundTask inside the server process,
+    so a restart -- or a crash, or Ctrl-C -- abandons whatever was in
+    flight. Those rows previously sat at "processing" forever, showing a
+    progress bar that would never move, with no way to tell them from a
+    job that is genuinely still running.
+
+    Since nothing can resume them, they are marked failed at startup with
+    an explanation. Re-uploading the same file is cheap: the chunk-level
+    extraction cache still holds every chunk that finished before the
+    interruption, so only the remainder is re-run.
+    """
+    global _ORPHAN_SWEEP_DONE
+    if _ORPHAN_SWEEP_DONE:
+        return
+    _ORPHAN_SWEEP_DONE = True
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM documents WHERE status IN ('processing', 'pending')"
+        ).fetchall()
+        if not rows:
+            return
+        conn.execute(
+            "UPDATE documents SET status = 'failed', progress_json = NULL, "
+            "error_message = 'Interrupted by a server restart -- no worker was left to finish it. "
+            "Re-upload to resume; already-extracted chunks are still cached.' "
+            "WHERE status IN ('processing', 'pending')"
+        )
+    print(f"Marked {len(rows)} interrupted document(s) as failed on startup.")
+
 
 # ---------------- documents ----------------
 

@@ -180,3 +180,30 @@ class TestPipelineFingerprintInvalidation:
         monkeypatch.setattr(config, "LLM_CONCURRENCY", 8)
         monkeypatch.setattr(config, "SIMILARITY_THRESHOLD", 0.99)
         assert config.pipeline_fingerprint() == before
+
+
+class TestOrphanedJobRecovery:
+    """Ingestion runs as a BackgroundTask inside the server process, so a
+    restart abandons whatever was in flight. Those rows used to sit at
+    "processing" forever, showing a progress bar that would never move."""
+
+    def test_the_sweep_runs_only_once_per_process(self):
+        """init_db() is also called from tests; sweeping on a later call
+        would kill a job that is genuinely running -- exactly the failure
+        it exists to clean up after."""
+        from app import db
+        assert db._ORPHAN_SWEEP_DONE is True, "init_db should have swept at import time"
+
+        # A second call must be a no-op even with an in-flight document.
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
+                "VALUES ('live.pdf', '/tmp/live.pdf', 'processing', 0)"
+            )
+            live_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+        try:
+            db._fail_orphaned_jobs()
+            assert db.get_document(live_id)["status"] == "processing"
+        finally:
+            with db.get_conn() as conn:
+                conn.execute("DELETE FROM documents WHERE id = ?", (live_id,))
