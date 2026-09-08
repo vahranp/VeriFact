@@ -142,53 +142,68 @@ def init_db():
         _ensure_column(conn, "documents", "pipeline_fingerprint", "TEXT")
 
 
-# The sweep must run only when the SERVER starts, never from init_db().
+# A job is declared orphaned by STALENESS, not by process identity.
 #
-# It was originally called from init_db() with a once-per-process guard,
-# and that guard was not enough -- it bit within minutes. A separate
-# python process querying the database calls init_db(), gets its own fresh
-# module state, and sweeps: it marked a document that the running server
-# was actively extracting as "failed". A per-process guard cannot see
-# other processes.
+# Two earlier attempts got this wrong, and each one killed a live job.
+# Calling the sweep from init_db() meant any script touching the database
+# swept. Adding a once-per-process guard did not help, because a guard
+# cannot see other processes -- running the test suite starts a FastAPI
+# TestClient, which fires the startup hook, which swept the running
+# server's work.
 #
-# The server owns background jobs, so only the server may declare them
-# orphaned. main.py calls this from its startup hook; scripts and tests
-# touching the same database no longer touch running work.
-_ORPHAN_SWEEP_DONE = False
+# Staleness is the only signal that is correct across processes. A live job
+# writes progress after every chunk; an abandoned one never writes again.
+# So a document is orphaned when its last progress write is older than this
+# threshold, which is set well above the slowest single chunk on a local
+# model so a genuinely slow job is never mistaken for a dead one.
+STALE_JOB_SECONDS = 20 * 60
 
 
-def fail_orphaned_jobs():
-    """Marks documents left mid-processing by a previous run as failed.
+def fail_orphaned_jobs(now: Optional[float] = None):
+    """Marks documents abandoned by a previous run as failed.
 
     Ingestion runs as a FastAPI BackgroundTask inside the server process,
-    so a restart -- or a crash, or Ctrl-C -- abandons whatever was in
-    flight. Those rows previously sat at "processing" forever, showing a
-    progress bar that would never move, with no way to tell them from a
-    job that is genuinely still running.
+    so a restart or crash abandons whatever was in flight. Those rows
+    otherwise sit at "processing" forever, showing a progress bar that will
+    never move, indistinguishable from a job still running.
 
-    Since nothing can resume them, they are marked failed at startup with
-    an explanation. Re-uploading the same file is cheap: the chunk-level
-    extraction cache still holds every chunk that finished before the
-    interruption, so only the remainder is re-run.
+    Nothing can resume them, so they are failed with an explanation.
+    Re-uploading is cheap: the chunk-level extraction cache still holds
+    every chunk that finished before the interruption.
     """
-    global _ORPHAN_SWEEP_DONE
-    if _ORPHAN_SWEEP_DONE:
-        return
-    _ORPHAN_SWEEP_DONE = True
+    now = time.time() if now is None else now
+    cutoff = now - STALE_JOB_SECONDS
+    swept = []
 
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id FROM documents WHERE status IN ('processing', 'pending')"
-        ).fetchall()
-        if not rows:
-            return
-        conn.execute(
-            "UPDATE documents SET status = 'failed', progress_json = NULL, "
-            "error_message = 'Interrupted by a server restart -- no worker was left to finish it. "
-            "Re-upload to resume; already-extracted chunks are still cached.' "
+            "SELECT id, progress_json, uploaded_at FROM documents "
             "WHERE status IN ('processing', 'pending')"
-        )
-    print(f"Marked {len(rows)} interrupted document(s) as failed on startup.")
+        ).fetchall()
+
+        for row in rows:
+            last_activity = row["uploaded_at"] or 0
+            if row["progress_json"]:
+                try:
+                    last_activity = max(last_activity,
+                                        json.loads(row["progress_json"]).get("at", 0))
+                except (ValueError, TypeError):
+                    pass
+            if last_activity < cutoff:
+                swept.append(row["id"])
+
+        if swept:
+            conn.executemany(
+                "UPDATE documents SET status = 'failed', progress_json = NULL, "
+                "error_message = 'Interrupted -- no worker was left to finish it. "
+                "Re-upload to resume; already-extracted chunks are still cached.' "
+                "WHERE id = ?",
+                [(i,) for i in swept],
+            )
+
+    if swept:
+        print(f"Marked {len(swept)} interrupted document(s) as failed: {swept}")
+    return swept
 
 
 # ---------------- documents ----------------
@@ -216,6 +231,10 @@ def set_progress(document_id: int, stage: str, current: int, total: int, detail:
     thread, keeping all SQLite writes single-threaded."""
     update_document(document_id, progress_json=json.dumps({
         "stage": stage, "current": current, "total": total, "detail": detail,
+        # Written so an interrupted job can be told from a slow one -- see
+        # fail_orphaned_jobs, which uses staleness rather than process
+        # identity because a guard cannot see other processes.
+        "at": time.time(),
     }))
 
 

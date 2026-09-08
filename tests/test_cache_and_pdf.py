@@ -187,62 +187,92 @@ class TestOrphanedJobRecovery:
     restart abandons whatever was in flight. Those rows used to sit at
     "processing" forever, showing a progress bar that would never move.
 
-    The first version of this fix called the sweep from db.init_db() with a
-    once-per-process guard, and that was not enough -- it bit within
-    minutes. A separate python process querying the database calls
-    init_db(), gets fresh module state, and swept: it marked a document the
-    running server was actively extracting as failed. A per-process guard
-    cannot see other processes, so only the server may sweep.
+    Two earlier versions of this fix each killed a live job. Calling the
+    sweep from init_db() meant any script touching the database swept.
+    A once-per-process guard did not help either -- running this very test
+    suite starts a FastAPI TestClient, which fires the startup hook, which
+    swept the running server's work. A guard cannot see other processes.
+
+    Staleness is the only signal correct across processes: a live job
+    writes progress after every chunk, an abandoned one never writes again.
     """
 
-    def test_init_db_does_not_sweep(self):
-        """The property that actually broke: importing the db module and
-        initialising it must never touch running work."""
+    def _insert(self, status, progress_at=None, uploaded_at=None):
+        import json, time
         from app import db
+        progress = json.dumps({"stage": "extracting", "current": 1, "total": 4,
+                               "detail": None, "at": progress_at}) if progress_at else None
         with db.get_conn() as conn:
             conn.execute(
-                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
-                "VALUES ('live.pdf', '/tmp/live.pdf', 'processing', 0)"
+                "INSERT INTO documents (original_name, stored_path, status, uploaded_at, progress_json) "
+                "VALUES ('t.pdf', '/tmp/t.pdf', ?, ?, ?)",
+                (status, uploaded_at if uploaded_at is not None else time.time(), progress),
             )
-            live_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
-        try:
-            db.init_db()
-            assert db.get_document(live_id)["status"] == "processing"
-        finally:
-            with db.get_conn() as conn:
-                conn.execute("DELETE FROM documents WHERE id = ?", (live_id,))
+            return conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
 
-    def test_the_server_sweep_marks_interrupted_jobs_failed(self):
+    def _cleanup(self, doc_id):
         from app import db
-        db._ORPHAN_SWEEP_DONE = False
         with db.get_conn() as conn:
-            conn.execute(
-                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
-                "VALUES ('stale.pdf', '/tmp/stale.pdf', 'processing', 0)"
-            )
-            stale_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+            conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+
+    def test_a_job_that_just_reported_progress_is_left_alone(self):
+        """The property that broke twice: a running job must survive a
+        sweep triggered from any other process."""
+        import time
+        from app import db
+        doc_id = self._insert("processing", progress_at=time.time())
         try:
             db.fail_orphaned_jobs()
-            row = db.get_document(stale_id)
+            assert db.get_document(doc_id)["status"] == "processing"
+        finally:
+            self._cleanup(doc_id)
+
+    def test_a_stale_job_is_failed(self):
+        import time
+        from app import db
+        stale = time.time() - db.STALE_JOB_SECONDS - 60
+        doc_id = self._insert("processing", progress_at=stale, uploaded_at=stale)
+        try:
+            db.fail_orphaned_jobs()
+            row = db.get_document(doc_id)
             assert row["status"] == "failed"
             assert "Interrupted" in row["error_message"]
         finally:
-            with db.get_conn() as conn:
-                conn.execute("DELETE FROM documents WHERE id = ?", (stale_id,))
+            self._cleanup(doc_id)
 
-    def test_the_sweep_runs_only_once_per_process(self):
+    def test_a_pending_job_with_no_progress_yet_is_judged_on_upload_time(self):
+        """A job queued seconds ago has written no progress -- that is not
+        evidence it is dead."""
+        import time
         from app import db
-        db._ORPHAN_SWEEP_DONE = False
-        db.fail_orphaned_jobs()
-        with db.get_conn() as conn:
-            conn.execute(
-                "INSERT INTO documents (original_name, stored_path, status, uploaded_at) "
-                "VALUES ('live2.pdf', '/tmp/live2.pdf', 'processing', 0)"
-            )
-            live_id = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+        fresh = self._insert("pending", uploaded_at=time.time())
+        old = self._insert("pending", uploaded_at=time.time() - db.STALE_JOB_SECONDS - 60)
         try:
             db.fail_orphaned_jobs()
-            assert db.get_document(live_id)["status"] == "processing"
+            assert db.get_document(fresh)["status"] == "pending"
+            assert db.get_document(old)["status"] == "failed"
         finally:
-            with db.get_conn() as conn:
-                conn.execute("DELETE FROM documents WHERE id = ?", (live_id,))
+            self._cleanup(fresh)
+            self._cleanup(old)
+
+    def test_init_db_does_not_sweep(self):
+        import time
+        from app import db
+        doc_id = self._insert("processing", progress_at=time.time() - db.STALE_JOB_SECONDS - 60)
+        try:
+            db.init_db()
+            assert db.get_document(doc_id)["status"] == "processing"
+        finally:
+            self._cleanup(doc_id)
+
+    def test_progress_writes_a_timestamp(self):
+        """Staleness detection depends on it."""
+        import json
+        from app import db
+        doc_id = self._insert("processing")
+        try:
+            db.set_progress(doc_id, "extracting", 1, 4, None)
+            progress = json.loads(db.get_document(doc_id)["progress_json"])
+            assert progress["at"] > 0
+        finally:
+            self._cleanup(doc_id)
