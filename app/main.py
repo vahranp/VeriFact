@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import db
 from app.cache import hash_file
+from app.coherence import check_coherence
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
 from app.pdf_extract import PageSpecError, page_count, parse_page_spec
 from app.pipeline import process_document
@@ -275,4 +276,79 @@ def stats():
         "relationships": len(rels),
         "relationships_by_type": by_type,
         "issues": len(issues),
+    }
+
+
+@app.get("/api/coherence")
+def graph_coherence(limit: int = Query(25, ge=1, le=200)):
+    """Logical coherence of the relationship graph.
+
+    Relationships are judged pairwise and in isolation, so the graph they
+    form can be internally impossible: if A corroborates B and B
+    corroborates C, then A cannot contradict C. Triangles like that prove
+    at least one of those judgments is wrong -- with no ground truth, no
+    reviewer, and no extra model call. The same transitivity also implies
+    edges that candidate retrieval never shortlisted.
+
+    See app/coherence.py.
+    """
+    relationships = db.list_relationships()
+    facts_by_id = {f["id"]: f for f in db.list_facts()}
+    report = check_coherence(relationships, facts_by_id=facts_by_id)
+
+    cache: dict = {}
+
+    def describe(fact_id: int) -> dict:
+        fact = facts_by_id.get(fact_id)
+        if not fact:
+            return {"id": fact_id}
+        return {
+            "id": fact_id,
+            "statement": fact.get("statement"),
+            "value": fact.get("value"),
+            "unit": fact.get("unit"),
+            "document_name": _doc_name(fact["document_id"], cache),
+            "page_number": fact.get("page_number"),
+        }
+
+    return {
+        "summary": report.summary(),
+        "nodes": report.nodes,
+        "edges": report.edges,
+        "triangles_checked": report.triangles_checked,
+        "violation_rate": round(report.violation_rate, 4),
+        "violations_total": len(report.violations),
+        "implicated_edges": len(report.implicated_edges),
+        "inferences_total": len(report.inferences),
+        "violations": [
+            {
+                "facts": [describe(fid) for fid in v.fact_ids],
+                "description": v.describe(),
+                "reason": v.reason,
+                "suspect_relationship_id": v.suspect.get("id"),
+                "edges": [
+                    {
+                        "id": e.get("id"),
+                        "relation_type": e.get("relation_type"),
+                        "confidence": e.get("confidence"),
+                        "fact_id_a": e.get("fact_id_a"),
+                        "fact_id_b": e.get("fact_id_b"),
+                        "is_suspect": e.get("id") == v.suspect.get("id"),
+                    }
+                    for e in v.edges
+                ],
+            }
+            for v in report.violations[:limit]
+        ],
+        "inferences": [
+            {
+                "fact_a": describe(i.fact_id_a),
+                "fact_b": describe(i.fact_id_b),
+                "relation_type": i.relation_type,
+                "via_fact_id": i.via_fact_id,
+                "confidence": i.confidence,
+                "explanation": i.explanation,
+            }
+            for i in report.inferences[:limit]
+        ],
     }

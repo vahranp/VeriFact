@@ -38,6 +38,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
         Facts <span class="sb-count" id="cFacts"></span>
       </button>
+      <button class="sb-item" data-view="coherence">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="18" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M10.4 6.9 6.6 15.9"/><path d="M13.6 6.9l3.8 9"/><path d="M7.4 18h9.2"/></svg>
+        Logic Check <span class="sb-count" id="cCoh"></span>
+      </button>
       <button class="sb-item" data-view="issues">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         Extraction Issues <span class="sb-count" id="cIssues"></span>
@@ -172,6 +176,11 @@
       </section>
 
       <!-- issues -->
+      <section id="view-coherence" class="view">
+        <div id="cohHead"></div>
+        <div id="cohBody"></div>
+      </section>
+
       <section id="view-issues" class="view">
         <div class="card card-b mb16 small">
           Things the pipeline flagged as uncertain or failed — a quote that couldn't be found verbatim, a response that

@@ -188,8 +188,8 @@ function paintChrome() {
 
 // ---------------- routing ----------------
 
-const VIEWS = ["overview", "document", "graph", "relationships", "facts", "documents", "issues", "upload"];
-const TITLES = { overview: "Overview", graph: "Knowledge Graph", relationships: "Relationships", facts: "Facts", documents: "All documents", issues: "Extraction Issues", upload: "Upload document" };
+const VIEWS = ["overview", "document", "graph", "relationships", "facts", "coherence", "documents", "issues", "upload"];
+const TITLES = { overview: "Overview", graph: "Knowledge Graph", relationships: "Relationships", facts: "Facts", coherence: "Logic Check", documents: "All documents", issues: "Extraction Issues", upload: "Upload document" };
 
 function go(route) { if (location.hash.slice(1) !== route) location.hash = route; else route_(route); }
 
@@ -210,6 +210,7 @@ async function route_(route) {
   if (view === "facts") renderFacts();
   if (view === "documents") renderDocTable();
   if (view === "issues") renderIssues();
+  if (view === "coherence") renderCoherence();
 }
 
 document.querySelectorAll(".sb-item[data-view]").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
@@ -745,3 +746,97 @@ $("upBtn").addEventListener("click", async () => {
   await route_(location.hash.slice(1) || "overview");
   renderDocTable();
 })();
+
+// ---------------- logic check (graph coherence) ----------------
+// Relationships are judged pairwise and in isolation, so the graph they
+// form can be internally impossible. This view surfaces those proofs and
+// the edges transitivity implies. See app/coherence.py.
+
+const REL_DOT = (t) => `<span class="cdot" style="background:${C[t] || "#94a3b8"}"></span>`;
+
+function cohFactLine(f) {
+  if (!f || !f.statement) return `<div class="cfact"><span class="small">fact ${esc(f && f.id)}</span></div>`;
+  return `<div class="cfact">
+    <div class="cfact-t">${esc(f.statement)}</div>
+    <div class="small">${esc(docName(f.document_name))} · p.${esc(f.page_number)}</div>
+  </div>`;
+}
+
+function cohViolation(v) {
+  const edges = v.edges.map((e) => `
+    <div class="cedge ${e.is_suspect ? "suspect" : ""}">
+      ${REL_DOT(e.relation_type)}
+      <b>${esc(e.relation_type)}</b>
+      <span class="small num">confidence ${e.confidence == null ? "—" : Number(e.confidence).toFixed(2)}</span>
+      ${e.is_suspect ? `<span class="ctag">most likely wrong</span>` : ""}
+    </div>`).join("");
+  return `<div class="ccard rise">
+    <div class="ccard-h">${I.alert}<b>Impossible triangle</b>
+      <span class="small" style="margin-left:auto">facts ${v.facts.map((f) => esc(f.id)).join(" · ")}</span>
+    </div>
+    <div class="ccard-b">
+      <div class="cfacts">${v.facts.map(cohFactLine).join("")}</div>
+      <div class="cedges">${edges}</div>
+      <div class="why"><b>Why this can't hold:</b> ${esc(v.reason)}</div>
+    </div>
+  </div>`;
+}
+
+function cohInference(i) {
+  return `<div class="ccard rise">
+    <div class="ccard-h">${REL_DOT(i.relation_type)}<b>${esc(i.relation_type)}</b>
+      <span class="ctag ok">deduced · no model call</span>
+      <span class="small num" style="margin-left:auto">confidence ${Number(i.confidence).toFixed(2)}</span>
+    </div>
+    <div class="ccard-b">
+      <div class="cfacts">${cohFactLine(i.fact_a)}${cohFactLine(i.fact_b)}</div>
+      <div class="why"><b>Reasoning:</b> ${esc(i.explanation)}</div>
+    </div>
+  </div>`;
+}
+
+async function renderCoherence() {
+  const head = $("cohHead"), body = $("cohBody");
+  if (!head || !body) return;
+  head.innerHTML = `<div class="empty">${I.loader}<span>Checking the graph…</span></div>`;
+  body.innerHTML = "";
+
+  let d;
+  try {
+    d = await (await fetch(`${API}/api/coherence?limit=25`)).json();
+  } catch (e) {
+    head.innerHTML = empty("Could not run the logic check.");
+    return;
+  }
+
+  const cnt = $("cCoh");
+  if (cnt) cnt.textContent = d.violations_total || "";
+
+  head.innerHTML = `
+    <div class="note">
+      Every relationship is judged <b>pairwise, in isolation</b>. But equality is transitive: if
+      A corroborates B and B corroborates C, then A <b>cannot</b> contradict C. Triangles like that
+      prove at least one judgment is wrong — with no ground truth, no reviewer, and no extra model
+      call. The same transitivity implies edges that candidate retrieval never shortlisted.
+    </div>
+    <div class="grid g4 mb24">
+      ${statTile("Closed triangles", d.triangles_checked, "checked for logical consistency", I.layers, "")}
+      ${statTile("Impossible", d.violations_total, `${(d.violation_rate * 100).toFixed(1)}% of triangles checked`, I.alert, d.violations_total ? "warn" : "good")}
+      ${statTile("Edges implicated", d.implicated_edges, "at least one per triangle is wrong", I.link, "")}
+      ${statTile("Deduced edges", d.inferences_total, "found with no model call", I.zap, "good")}
+    </div>`;
+  // The tiles animate from zero via [data-count]; without this they stay
+  // showing 0, which reads as "nothing found" rather than "not yet counted".
+  animateIn(head);
+
+  body.innerHTML = `
+    <h3 class="sec">Proven inconsistencies</h3>
+    ${d.violations.length ? d.violations.map(cohViolation).join("") : empty("No logically impossible triangles. The graph is self-consistent.")}
+    <h3 class="sec">Relationships deduced by transitivity</h3>
+    <div class="note small">These were never sent to the model. They follow from edges the graph
+    already contains, and any deduction resting on an edge implicated above is discarded rather
+    than inheriting a known error.</div>
+    ${d.inferences.length ? d.inferences.map(cohInference).join("") : empty("Nothing further follows from the current graph.")}`;
+
+  animateIn(body);
+}

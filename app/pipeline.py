@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 from app import db
 from app.arithmetic import check_arithmetic_consistency
+from app.coherence import check_coherence
 from app.config import LLM_CONCURRENCY
 from app.embeddings import embed
 from app.fact_extraction import extract_facts_from_chunk
@@ -67,6 +68,9 @@ def _log_stats(document_name: str, stats: dict):
         f"    database:              {_fmt(stats['timing']['database'])}",
         f"  Arithmetic self-validation: {stats.get('arithmetic_identities', 0)} identities confirmed, "
         f"{stats.get('arithmetic_anomalies', 0)} scale anomalies flagged",
+        f"  Graph coherence: {stats.get('coherence_violations', 0)} impossible triangles of "
+        f"{stats.get('coherence_triangles', 0)} checked, "
+        f"{stats.get('coherence_inferences', 0)} edges inferable by transitivity",
         f"  Total processing time: {_fmt(stats['timing']['total'])}",
     ]
     print("\n".join(lines))
@@ -183,6 +187,24 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             sw.totals["candidate_retrieval"] = sw.totals.get("candidate_retrieval", 0.0) + rel_summary["candidate_retrieval_seconds"]
             sw.totals["relationship_reasoning"] = sw.totals.get("relationship_reasoning", 0.0) + rel_summary["llm_reasoning_seconds"]
 
+        # --- Graph coherence (deterministic, no LLM call). Pairwise
+        # judgments are made in isolation, so the graph they form can be
+        # internally impossible: A=B and B=C while A!=C. Those triangles
+        # prove at least one judgment is wrong without any ground truth,
+        # and the same transitivity fills in edges retrieval never
+        # shortlisted. See app/coherence.py.
+        coherence = None
+        with sw.track("coherence"):
+            all_rels = db.list_relationships()
+            facts_by_id = {f["id"]: f for f in db.list_facts()}
+            coherence = check_coherence(all_rels, facts_by_id=facts_by_id)
+        with sw.track("database"):
+            for violation in coherence.violations[:50]:
+                db.insert_issue(
+                    document_id, None, "graph_incoherence",
+                    violation.describe(), violation.reason,
+                )
+
         total_seconds = time.perf_counter() - t_total0
         stats = {
             "pages": len({c.page_number for c in chunks}),
@@ -199,6 +221,9 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
             "relationship_errors": rel_summary["errors"],
             "arithmetic_identities": len(arithmetic_report.identities) if arithmetic_report else 0,
             "arithmetic_anomalies": len(arithmetic_report.scale_anomalies) if arithmetic_report else 0,
+            "coherence_triangles": coherence.triangles_checked if coherence else 0,
+            "coherence_violations": len(coherence.violations) if coherence else 0,
+            "coherence_inferences": len(coherence.inferences) if coherence else 0,
             "timing": {
                 "pdf_extraction": sw.totals.get("pdf_extraction", 0.0),
                 "fact_extraction": sw.totals.get("fact_extraction", 0.0),
@@ -206,6 +231,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
                 "candidate_retrieval": sw.totals.get("candidate_retrieval", 0.0),
                 "relationship_reasoning": sw.totals.get("relationship_reasoning", 0.0),
                 "arithmetic": sw.totals.get("arithmetic", 0.0),
+                "coherence": sw.totals.get("coherence", 0.0),
                 "database": sw.totals.get("database", 0.0),
                 "total": total_seconds,
             },
