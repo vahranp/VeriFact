@@ -16,7 +16,7 @@ an unverifiable claim is exactly what this project exists not to store).
 """
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 _NULLISH = {"null", "none", "n/a", "na", "-", ""}
 

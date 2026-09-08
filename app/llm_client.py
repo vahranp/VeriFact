@@ -142,7 +142,6 @@ def chat_json(model: str, system: str, user: str, temperature: float = 0.0,
     caller = _call_ollama if LLM_PROVIDER == "ollama" else _call_openai_compatible
 
     content = None
-    last_exc = None
     for attempt in range(max_retries):
         try:
             content = caller(model, system, user, temperature, max_tokens, timeout)
@@ -150,7 +149,6 @@ def chat_json(model: str, system: str, user: str, temperature: float = 0.0,
         except httpx.TimeoutException as exc:
             raise LLMError(f"Timed out calling {model} after {timeout}s (not retried): {exc}") from exc
         except (httpx.HTTPError, LLMError, KeyError, IndexError) as exc:
-            last_exc = exc
             if attempt < max_retries - 1:
                 time.sleep(1.5 * (attempt + 1))
                 continue

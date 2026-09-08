@@ -25,7 +25,7 @@ from app import db
 from app.cache import canonical_pair_order, hash_fact_pair, hash_text
 from app.config import (
     LLM_CONCURRENCY, REASONING_MODEL, REASONING_TIMEOUT_SECONDS,
-    SIMILARITY_TOP_K, SIMILARITY_THRESHOLD,
+    SIMILARITY_TOP_K,
 )
 from app.candidates import score_pair
 from app.embeddings import top_k_similar

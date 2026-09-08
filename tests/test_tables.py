@@ -9,7 +9,6 @@ behaviour on known geometry rather than on whatever the starter documents
 happen to contain.
 """
 import fitz
-import pytest
 
 from app.tables import (
     Row, _split_into_cells, find_gutters, layout_aware_text, looks_tabular,
