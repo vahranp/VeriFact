@@ -94,6 +94,22 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
         doc.close()
 
 
+def has_extractable_text(pdf_path: str) -> bool:
+    """True when at least one page has enough real text to be worth
+    processing.
+
+    A scanned or image-only PDF -- no embedded text layer at all -- passes
+    every other upload check (a real page count, not encrypted) and would
+    otherwise run through the whole pipeline and complete "done" with zero
+    facts and no signal that nothing was ever extractable. That looks
+    identical to a quiet failure, not the honest outcome it actually is
+    for a document this system cannot read (OCR is out of scope).
+    Checked with the same extract_pages() the real pipeline uses, so this
+    reports exactly what the pipeline itself would find -- not a separate,
+    possibly-inconsistent heuristic."""
+    return bool(extract_pages(pdf_path))
+
+
 def _page_context(text: str) -> str:
     """The page's opening lines, trimmed at a line boundary so a
     denomination/title line isn't cut mid-word."""

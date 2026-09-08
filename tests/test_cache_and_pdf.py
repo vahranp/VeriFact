@@ -363,3 +363,46 @@ class TestOnePageFailureDoesNotSinkTheDocument:
         pages = pdf_extract.extract_pages(path)
         assert len(pages) == 1, "the failing page is skipped, the good one is kept"
         assert "second good page" in pages[0][1]
+
+
+class TestScannedPdfHandling:
+    """A scanned/image-only PDF -- no embedded text layer -- passes every
+    other upload check (a real page count, not encrypted) and would
+    otherwise run the whole pipeline and complete "done" with zero facts,
+    looking exactly like a quiet failure instead of the honest, expected
+    outcome for a document this system cannot read."""
+
+    @pytest.fixture
+    def scanned_pdf(self, tmp_path):
+        import fitz
+        path = str(tmp_path / "scanned.pdf")
+        doc = fitz.open()
+        for _ in range(3):
+            doc.new_page()  # no insert_text -- no text layer at all
+        doc.save(path)
+        doc.close()
+        return path
+
+    @pytest.fixture
+    def real_pdf(self, tmp_path):
+        import fitz
+        path = str(tmp_path / "real.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), "This page has a real embedded text layer, unlike a scan.")
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_a_scanned_pdf_has_no_extractable_text(self, scanned_pdf):
+        from app.pdf_extract import has_extractable_text
+        assert has_extractable_text(scanned_pdf) is False
+
+    def test_a_scanned_pdf_still_reports_a_real_page_count(self, scanned_pdf):
+        """The property that let this slip past validation before: page
+        count succeeds even with zero extractable text."""
+        from app.pdf_extract import page_count
+        assert page_count(scanned_pdf) == 3
+
+    def test_a_real_pdf_has_extractable_text(self, real_pdf):
+        from app.pdf_extract import has_extractable_text
+        assert has_extractable_text(real_pdf) is True

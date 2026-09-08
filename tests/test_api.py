@@ -126,6 +126,23 @@ class TestUploadValidation:
             client.post("/api/documents", files={"file": ("encrypted2.pdf", f, "application/pdf")})
         assert len(client.get("/api/documents").json()) == before
 
+    def test_a_scanned_pdf_with_no_text_layer_is_rejected_with_400(self, client, tmp_path):
+        """The other half of the same class of gap: a scanned PDF passes
+        every existing check (real page count, not encrypted) and used to
+        run the whole pipeline to completion with zero facts -- a quiet
+        failure dressed up as success."""
+        import fitz
+        path = str(tmp_path / "scanned.pdf")
+        doc = fitz.open()
+        doc.new_page()  # no text layer
+        doc.save(path)
+        doc.close()
+
+        with open(path, "rb") as f:
+            r = client.post("/api/documents", files={"file": ("scanned.pdf", f, "application/pdf")})
+        assert r.status_code == 400
+        assert "extractable text" in r.json()["detail"].lower()
+
     @pytest.mark.parametrize("spec,fragment", [
         ("24-24-24", "start-end"),
         ("10-3", "backwards"),

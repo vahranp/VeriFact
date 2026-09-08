@@ -22,7 +22,7 @@ from app import db
 from app.cache import hash_file
 from app.coherence import check_coherence
 from app.config import UPLOAD_DIR, BASE_DIR, MAX_UPLOAD_MB, LARGE_JOB_PAGE_WARNING
-from app.pdf_extract import PageSpecError, is_encrypted, page_count, parse_page_spec
+from app.pdf_extract import PageSpecError, has_extractable_text, is_encrypted, page_count, parse_page_spec
 from app.pipeline import process_document
 
 app = FastAPI(title="Fact Knowledge Layer")
@@ -148,6 +148,18 @@ async def upload_document(
     if is_encrypted(str(dest)):
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "That PDF is password-protected -- please remove the password and re-upload.")
+
+    # A scanned/image-only PDF (no embedded text layer) would otherwise
+    # pass every check above, run the whole pipeline, and complete "done"
+    # with zero facts -- looking exactly like a quiet failure rather than
+    # the honest, expected outcome for a document this system cannot read.
+    if not has_extractable_text(str(dest)):
+        dest.unlink(missing_ok=True)
+        raise HTTPException(
+            400,
+            "No extractable text was found on any page. This PDF may be a scanned image with "
+            "no text layer -- OCR is not currently supported.",
+        )
 
     content_hash = hash_file(str(dest))
     page_selector = pages if pages else (f"max:{max_pages}" if max_pages is not None else None)
