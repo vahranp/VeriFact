@@ -11,9 +11,9 @@ DIFFERENT") and asked it to decide corroborates/contradicts/reconciled/
 uncertain -- but nothing in code checked the answer against the facts it
 had just been given. The model was told to trust them; nothing made it.
 That gap is exactly how a broken prompt could once turn a clean 0.006%
-agreement into a stored "contradicts" (see INTERVIEW_NOTES.md) and it is
-why an unexplained same-period, same-scope disagreement could just as
-easily come back "reconciled" if the model felt like inventing a reason.
+agreement into a stored "contradicts", and it is why an unexplained
+same-period, same-scope disagreement could just as easily come back
+"reconciled" if the model felt like inventing a reason.
 
 adjudicate() closes it: given the model's proposal and the SAME
 deterministic facts the prompt already contains, it decides the FINAL
@@ -92,9 +92,9 @@ def _confidence_for(source: str, llm_confidence: Optional[float]) -> Optional[fl
     billion" is not a 0.9-confidence statement, it is arithmetic. Only a
     decision resting entirely on the model's own reading (LLM_UNCHECKED)
     keeps the model's own confidence number, which is a stated opinion,
-    not a calibrated probability (see INTERVIEW_NOTES.md #8: a false
-    corroborates edge was once seen at confidence 1.0 while the correct
-    edge sat at 0.8 -- model confidence is not a reliable arbiter)."""
+    not a calibrated probability -- a false corroborates edge was once seen
+    at confidence 1.0 while the correct edge sat at 0.8, i.e. model
+    confidence is not a reliable arbiter."""
     return 1.0 if source in (DETERMINISTIC_OVERRIDE, DETERMINISTIC_CONFIRMED) else llm_confidence
 
 

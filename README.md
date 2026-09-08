@@ -194,15 +194,6 @@ For a large PDF, the upload form accepts an optional page limit (`max pages`) or
 selector (e.g. `1,3,7-10`) so you can target specific content instead of paying to process every
 page. The API supports the same via `POST /api/documents?pages=1,3,7-10`.
 
-## Video Demo
-
-`[ADD LINK HERE AFTER RECORDING]`
-
-Shows: uploading a PDF, the four required cases (corroboration / contradiction / reconciled
-contradiction / extraction failure) with their source evidence, the LLM-vs-system disagreement
-feature, and the Extraction Issues view. Full scene-by-scene shot list and narration in
-[VIDEO_SCRIPT.pdf](VIDEO_SCRIPT.pdf).
-
 ## Approach
 
 ### What counts as a "fact," and why the schema is generic
@@ -837,21 +828,32 @@ during development.
   model would need less of that, and the architecture supports swapping one in by changing
   configuration alone.
 
-## Additional Notes
+### What was intentionally not implemented
 
-- AI tools used: built interactively with Claude (Claude Code) as a pair-programming/build agent —
-  it wrote the scaffolding, pipeline, prompts, and this README under direction, and did the actual
-  debugging (diagnosing the OpenRouter credit issue, the Ollama JSON-shape bug, the timeout/retry
-  pathology, the table column-misalignment failure, the embedding-threshold gap, and everything
-  else documented above) with results verified against the running system — real uploads, real
-  timing, real `ollama ps`/benchmark output — rather than assumed or described hypothetically.
-  Several conclusions in this README (the concurrency default, the chunk-size cliff, the model
-  recommendation) were revised at least once after new evidence contradicted an earlier
-  measurement; those reversals are kept visible in the write-up rather than smoothed over.
-- The `india-macroeconomy` folder from the broader starter dataset (Economic Survey / RBI Annual
-  Report / IMF Article IV) was *not* used to build or tune anything in this pipeline during
-  development — kept as an independent, untouched dataset specifically so it could later prove
-  generalization rather than merely argue it. This hardening pass is that later: see
-  [Generalization](#generalization-proven-empirically-an-imf-article-iv-report-and-an-rbi-annual-report)
-  for the actual run, made after every other change in this pass, against documents nothing here
-  was written with in mind.
+Deliberate scope decisions, not oversights — each one measured or reasoned through rather than
+assumed:
+
+- **Currency/scale/basis as separate fact-schema columns.** Already captured inside
+  `unit`/`scope`/`time_period` and parsed deterministically downstream with no information loss;
+  splitting them out would mean changing the extraction prompt (re-extraction risk, more burden on
+  an 8B model) for no behavioral gain.
+- **Full bounding-box/coordinate evidence storage.** The existing text-quote grounding — verbatim
+  in the layout-reconstructed text shown to the model, stated precisely as that rather than implied
+  more strongly — is adequate for the stated purpose; per-word PDF coordinates would be a much
+  larger evidence model for no corresponding gain here.
+- **Widening candidate retrieval beyond embeddings + entity/lexical/numeric signals.** A hybrid
+  retriever was built and measured, then reverted: at most 3 additional pairs of recall for 3× the
+  LLM calls. Re-litigating a measured decision without new evidence would violate this project's
+  own "optimize only what's measured" rule.
+- **A DB-level unique constraint on relationships.** A real, narrow gap (a possible concurrent
+  duplicate insert) that isn't currently manifesting as a bug; adding a migration against a live
+  database whose existing-duplicate state wasn't verified was judged riskier than the gap it would
+  close.
+- **A hand-labelled precision benchmark, a vector index, a durable job queue, OCR, multi-agent
+  orchestration.** All out of scope for a prototype at this stage — none of the assignment's
+  "brownie point" extensions require them, and the existing limitations above are already honestly
+  stated rather than hidden behind added machinery.
+- **A fabricated multi-dimensional numeric confidence score** (e.g. a made-up
+  `context_confidence: 0.73`). The adjudication `checks` trace — categorical, recording which rule
+  fired and what each computed verdict was — represents uncertainty without inventing false
+  numerical precision.

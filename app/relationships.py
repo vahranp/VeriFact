@@ -51,7 +51,7 @@ from pydantic import ValidationError
 # This was originally set to 12 -- wider than SIMILARITY_TOP_K -- on the
 # assumption that entity/lexical/numeric signals would rescue pairs the
 # embedding ranking buries. Benchmarking that assumption on 304 real
-# extracted facts (scripts/bench_candidates.py) showed it was wrong:
+# extracted facts showed it was wrong:
 #
 #     K   embedding-only   hybrid   rescued by the new signals
 #     4        786           786          0
