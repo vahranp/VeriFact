@@ -419,3 +419,66 @@ example shows the category is not self-policing.
 The fix is not a prompt tweak — it's that a fact whose quote is a bare number carries no real
 evidence and should not be eligible for reconciliation in the first place. That check belongs at
 extraction time, alongside the existing quote-grounding verification.
+
+---
+
+## The graph can prove its own errors
+
+Everything above measures precision by *self-consistency*: re-judge under a corrected prompt, see
+what changes. That is useful but it is not correctness — a systematically wrong prompt would score
+perfectly against itself.
+
+`app/coherence.py` gives something categorically stronger. Relationships are judged pairwise and
+in isolation, but `corroborates` asserts equality, and equality is transitive:
+
+| triangle | possible? |
+|---|---|
+| E E E — three facts all agreeing | yes |
+| E N N — A = B, both differ from C | yes |
+| N N N — three different values | yes |
+| **E E N** — A = B and B = C, yet A ≠ C | **no** |
+
+A triangle of the last shape cannot occur in a correct graph. Its existence is a *proof* that at
+least one of those three LLM judgments is wrong — established with no ground truth, no human
+reviewer, and no additional model call.
+
+Measured on the real 348-relationship graph:
+
+| | |
+|---|---:|
+| closed triangles | 196 |
+| logically impossible | **25 (12.8%)** |
+| edges implicated | 62 |
+| edges deducible by transitivity | 126 |
+
+The violation rate is a genuine floor under the graph's error rate: at least one edge per violating
+triangle is wrong, and at most 62 are (one bad edge can break several triangles).
+
+### Blame assignment: confidence was actively misleading
+
+The first version blamed the least-confident edge in each broken triangle. That was wrong, and the
+real data said so immediately:
+
+```
+corroborates conf=1.00   revenue 81,415.38  ↔  revenue 72,253.01   ← the actual error
+corroborates conf=0.90   revenue 81,415.38  ↔  revenue 81,415.38   ← correct
+reconciled   conf=0.80   revenue 81,415.38  ↔  revenue 72,253.01   ← correct
+```
+
+The wrong edge was the *most* confident one, so blaming low confidence accused the right answer.
+
+The deterministic comparison in `app/normalize.py` is a far better arbiter, because it has no
+opinion: an edge claiming two facts corroborate while their normalized values differ is wrong
+regardless of how sure the model sounded. After the change, the suspect was correct in every
+sampled violation. Where the numbers can't settle it and confidences tie, the report says the
+culprit is undetermined rather than dressing an arbitrary pick up as a judgment.
+
+### Recall for free — the answer to a problem measured earlier
+
+Widening candidate retrieval was tried and rejected above: at K=12 it tripled LLM calls to buy
+3 pairs of recall. Transitivity buys **126 edges at zero marginal cost**, because they are
+deduced rather than searched for.
+
+Deductions resting on an edge that a violating triangle implicated are discarded (183 → 126).
+Propagating a judgment already known to be broken would turn one error into several, which is
+worse than the missing edge it fills.

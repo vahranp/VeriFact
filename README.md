@@ -44,9 +44,19 @@ PDF ──► page text ──► overlapping chunks ──► [LLM] extract fac
                                                         ▼
                              [LLM] step 2: given that computed comparison,
                                    corroborates / contradicts / reconciled
+                                                        │
+                                                        ▼
+                          ┌──────── logic check on the whole graph ────────┐
+                          │  equality is transitive, so A=B and B=C means  │
+                          │  A=C. A triangle saying otherwise PROVES one   │
+                          │  of its three judgments is wrong — no ground   │
+                          │  truth, no reviewer, no extra model call. The  │
+                          │  same rule deduces edges retrieval never       │
+                          │  shortlisted. (app/coherence.py)               │
+                          └────────────────────────────────────────────────┘
 ```
 
-**The two design decisions that matter most:**
+**The three design decisions that matter most:**
 
 1. **The model never does arithmetic.** Unit conversion is computed deterministically in
    `app/normalize.py` and handed to the model as a finished comparison. Asking an 8B model to
@@ -54,6 +64,31 @@ PDF ──► page text ──► overlapping chunks ──► [LLM] extract fac
    relationship in one call reliably failed at the point where those sub-tasks interact.
 2. **Every quote is verified in code**, not trusted from the model. A fact whose quote isn't
    found verbatim in the source page is re-grounded once, and dropped if that fails.
+3. **The graph checks itself.** Relationships are judged pairwise and in isolation, so the graph
+   they form can be internally impossible. Those impossible triangles are *proofs* of error —
+   a stronger thing than a confidence score, because the system produces evidence of its own
+   mistakes rather than an opinion about them.
+
+### Two ideas here I haven't seen elsewhere
+
+**Arithmetic self-validation** (`app/arithmetic.py`). Financial documents are full of internal
+invariants — a total equals the sum of its parts. Nothing tells the system those identities exist;
+it searches for `a + b ≈ c` among facts sharing a unit, period and scope. On the real balance sheet
+it independently discovered `liabilities + equity = assets` and
+`share capital + other equity = total equity`, both at 0.00% error, with no accounting rules
+encoded anywhere. That's extraction validation with no answer key. And a near-miss that resolves
+only if one value is rescaled by a power of ten is a very specific signal: a denomination misread,
+not a data conflict.
+
+**Graph coherence** (`app/coherence.py`). Because `corroborates` asserts equality and equality is
+transitive, a triangle with two `corroborates` and one `contradicts` cannot occur in a correct
+graph. On the real 348-relationship graph: **196 closed triangles, 25 logically impossible (12.8%),
+62 edges implicated, 126 further edges deducible for free.** Blame is assigned by the facts' own
+numbers rather than model confidence — confidence turned out to be actively misleading here, since
+the false `corroborates` edges came back at 1.0 while the correct `reconciled` edge sat at 0.8.
+
+Both follow the same principle, which is the one idea the project is really built on: **use the
+LLM only for what needs language understanding, and let arithmetic and logic check its work.**
 
 **Performance, benchmarks, and the experiments that failed:** see [PERFORMANCE.md](PERFORMANCE.md).
 

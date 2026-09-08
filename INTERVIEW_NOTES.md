@@ -223,6 +223,69 @@ resolves as `reconciled`, and Case 1 still corroborates at 1.0. A "fix" that lab
 `unrelated` would have looked identical on the failing cases and been worthless.
 
 
+### 22. How do you know your system is wrong, without a ground-truth dataset?
+
+This is the question I'd most want to be asked, because the usual answer — "the model returns a
+confidence score" — is worthless. A model that is confidently wrong reports high confidence.
+
+The relationship graph can prove its own errors. `corroborates` asserts equality, and equality is
+transitive. So if A corroborates B and B corroborates C, then A *cannot* contradict C. A triangle
+of that shape is not suspicious, it is **impossible** — its existence is a proof that at least one
+of those three judgments is wrong.
+
+On the real graph: 196 closed triangles, **25 logically impossible (12.8%)**, 62 edges implicated.
+No ground truth, no reviewer, no extra model call. And it gives a real floor on the error rate:
+at least one edge per violating triangle is wrong, at most 62 are.
+
+This is categorically stronger than the precision audit I did earlier. That measured
+self-consistency — re-judge under a corrected prompt, see what moves — which a systematically wrong
+prompt would pass perfectly. A violated transitivity constraint is not an opinion about the graph;
+it's a contradiction inside it.
+
+### 23. That sounds neat, but does it actually find anything useful?
+
+Yes, and it also corrected me. My first version blamed the least-confident edge in each broken
+triangle. The real data killed that immediately:
+
+```
+corroborates conf=1.00   revenue 81,415.38  ↔  revenue 72,253.01   ← the actual error
+corroborates conf=0.90   revenue 81,415.38  ↔  revenue 81,415.38   ← correct
+reconciled   conf=0.80   revenue 81,415.38  ↔  revenue 72,253.01   ← correct
+```
+
+The wrong edge was the *most* confident one. Blaming low confidence accused the right answer.
+
+So blame now goes to the deterministic comparison in `app/normalize.py`, which has no opinion: an
+edge claiming two facts corroborate while their normalized values differ is wrong no matter how
+sure the model sounded. After that change the suspect was correct in every case I sampled. Where
+the numbers can't settle it and confidences tie, it reports the culprit as undetermined rather
+than dressing an arbitrary pick up as a judgment.
+
+### 24. You said widening retrieval didn't work. Did you ever fix the recall problem?
+
+Yes — by deduction instead of search, which is the part I'm happiest with.
+
+Widening the candidate window tripled LLM calls to buy 3 pairs of recall, so I reverted it. But
+transitivity means that if A = B and B = C and no A–C edge exists, one is *implied*. That found
+**126 edges at zero marginal cost**, because they're derived from the graph rather than retrieved
+from the corpus.
+
+I discard any deduction resting on an edge that a violating triangle implicated (183 → 126).
+Propagating a judgment already known to be broken would turn one error into several, which is
+worse than the missing edge it fills.
+
+### 25. What's the single idea holding this project together?
+
+Use the LLM only for what genuinely needs language understanding, and let arithmetic and logic
+check its work.
+
+Every component follows it. Unit conversion is code, not a prompt. Quote grounding is verified in
+code, not self-reported. Arithmetic identities are discovered structurally, with no accounting
+rules encoded. And the graph's own transitivity audits the model's judgments. The model decides
+whether "net worth" and "total equity" mean the same thing — that genuinely needs language. It
+does not decide whether 81,415.38 equals 72,253.01.
+
+
 ---
 
 ## Honest self-assessment
