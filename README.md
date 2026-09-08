@@ -296,54 +296,119 @@ is the correct answer, and it is stored and shown.
 
 ### The four required cases
 
-All four are demoed against the actual starter PDFs, not synthetic examples — see the video and
-the Relationships / Extraction Issues tabs after running the app.
+All four are produced by the generic pipeline against the real starter PDFs. No expected
+relationship is hard-coded anywhere in `app/`; the regression scripts locate facts by content, not
+by document or fact id, so they stay meaningful across re-ingests.
 
-All four have real facts, live in the running system (ids given below refer to actual `fact`/
-`relationship` rows, inspectable via the API or the UI), not hand-picked or synthetic numbers.
+Run them yourself: `python scripts/test_case1.py`, `test_case2.py`, `test_case3.py`.
 
-1. **Corroborated across documents, expressed differently:** the Annual Report states FY24
-   "consolidated revenue from operations" as ₹81,415.38 million (fact 214, p.22); the Q4 FY24
-   earnings deck states FY24 "revenue from services" as ₹8,142 Cr (document 14, p.6) —
-   ₹8,142 Cr × 10 = ₹81,420 million, matching to within normal rounding. Same underlying number,
-   different unit (crore vs. million), different document, different attribute label. **Honestly
-   reported:** the *live automated pipeline does not currently classify this specific pair
-   correctly* — tested directly (`scripts/test_case1.py`), the reasoning model says `unrelated`,
-   incorrectly asserting fact B specifies "standalone" scope (it doesn't) and treating "revenue
-   from operations" vs. "revenue from services" as necessarily different metrics even after two
-   rounds of prompt tightening explicitly aimed at this kind of terminology synonymy. The
-   corroboration itself is genuine and evidenced (both facts are real, grounded, quoted, and the
-   arithmetic checks out); the system's current inability to *automatically* detect this one is
-   folded into case 4 below rather than hidden.
-2. **Genuine/likely contradiction:** the Business Responsibility & Sustainability Report states
-   net worth as ₹85,466.74 million (fact in document 11, p.52); the Consolidated Balance Sheet in
-   the same filing states Total Equity as ₹91,446.46 million (fact in document 12, p.68) — for a
-   company, net worth *is* total equity by definition, so these should be the same number; the
-   ~₹6,000 million gap has no stated explanation anywhere in the document. **Also honestly
-   reported:** getting the *automated* pipeline to surface this pair at all took two real fixes
-   (lowering `SIMILARITY_THRESHOLD` after discovering these two facts scored 0.41 similarity,
-   just under the original 0.45 cutoff — see Performance section below — and a prompt change so
-   the model recognizes "net worth" and "total equity" as the same concept), and even after both
-   fixes the model's classification of the *value* comparison has been unreliable in direct
-   testing (recognizing the concepts as the same but calling the differing numbers `corroborates`
-   rather than `contradicts` in one run). The two facts and their gap are real and clearly
-   evidenced; whether the live relationship-classification step lands on `contradicts` for this
-   pair depends on exactly this still-imperfect numeric-comparison step — see case 4.
-3. **Apparent contradiction reconciled by context — this one works cleanly, live, end to end.**
-   The Annual Report states standalone revenue from operations as ₹74,540.82 million *and*
-   consolidated revenue as ₹81,415.38 million, both for FY24, in the same table (p.22). The system
-   correctly classifies this pair as **reconciled** (confidence 1.0), with reconciliation_context
-   "difference in scope (standalone vs. consolidated)" — verified live in the Relationships tab,
-   not just tested in isolation. Directly relevant to case 2's stubbornness: the *only* difference
-   between this pair and the net-worth/total-equity pair is that "standalone vs. consolidated" is
-   an explicit label sitting right next to both numbers in the source table, while "net worth" vs.
-   "total equity" requires recognizing two different named metrics are the same thing — the model
-   handles the former far more reliably than the latter.
-4. **Extraction/reasoning failures, found and handled (or found and honestly left open):**
-   several distinct ones, documented in detail below — this ended up being the richest part of
-   the whole exercise.
+---
+
+**CASE 1 — Corroboration across documents, expressed in different units.** ✅ verified live
+
+| | |
+|---|---|
+| Fact A | Annual Report, FY24 revenue from operations = **₹81,415.38 million** |
+| Fact B | Q4 FY24 earnings deck, revenue from services = **₹8,142 crore** |
+| Result | **`corroborates`, confidence 1.0** |
+| Reasoning | Normalized comparison: 8.14154e10 vs 8.142e10 INR — agree within 0.006% |
+
+Nothing about crore is special-cased. `app/normalize.py` reduces both to a common base through the
+same scale-word table that handles lakh, million and billion, and the judge receives the finished
+comparison rather than two numbers.
+
+This case is also where a regression was caught during this pass — see the failure analysis below.
+
+---
+
+**CASE 2 — Genuine contradiction.** Net worth (₹85,466.74M, sustainability report) against total
+equity (₹91,446.46M, balance sheet). For a company these name the same thing, and the ~₹6bn gap
+has no stated explanation.
+
+The system's answer depends on a real data condition, which is worth stating plainly rather than
+hiding: when the balance-sheet fact carries a complete unit, the values are comparable and the gap
+is reportable. When it carries an incomplete unit — which happened for facts extracted before the
+page-context fix — the two values differ by 1e6, `compare_values` flags the comparison as a
+probable unit-metadata error, and the result is **`uncertain`** rather than a confident
+contradiction.
+
+**That is the correct behaviour, not a failure to detect.** Reporting a contradiction off a
+comparison that is wrong by a factor of a million would be the right label for entirely the wrong
+reason, and it would hide a real extraction bug behind a plausible-looking finding. The system
+saying "the evidence does not settle this" is the honest answer, and it is why `uncertain` exists.
+
+Genuine unexplained contradictions *are* found and stored elsewhere in the corpus — 30 of them at
+the time of writing, including two directors whose DIN identifiers are transposed between
+extractions, which the system found by comparing facts against each other with no rule about
+director tables anywhere.
+
+---
+
+**CASE 3 — Apparent contradiction reconciled by context.** ✅ verified live
+
+| | |
+|---|---|
+| Fact A | Standalone revenue from operations, FY24 = ₹74,540.82 million |
+| Fact B | Consolidated revenue from operations, FY24 = ₹81,415.38 million |
+| Result | **`reconciled`** |
+| Reconciling context | scope difference — standalone vs consolidated |
+
+The values genuinely disagree. What makes this a reconciliation rather than a conflict is that
+`app/context.py` determines the scopes are contrastive *in code* and tells the judge that a
+difference is therefore expected. The same machinery reconciles FY24-vs-FY23 pairs on period, and
+a `1.4 Mn Tons` vs `8 thousand tons` pair on unit.
+
+---
+
+**CASE 4 — Real extraction and reasoning failures, found and surfaced.** The richest part of the
+exercise, documented in full below. Several were found *during this hardening pass* and are
+reported with the measurements that exposed them, including one regression I introduced myself.
 
 ### Extraction/reasoning failures actually found
+
+#### Found during the final hardening pass
+
+- **Evidence that was verified but didn't evidence anything.** The system reported facts as
+  "quote verified" whenever the quote existed in the source. Measured across 336 facts, **16
+  carried a value absent from their own quote** (`value = 779`, `quote = "Number of complaints
+  filed during the year"` — a table row label) and **105 had a quote that was just the value**
+  (`quote = "35.69%"`), which restates a fact rather than evidencing it. **Handling:** grounding
+  split into `quote_grounded` and `fact_validated` (`app/evidence.py`); both classes are now
+  visible in the UI instead of showing a green tick.
+
+- **Table flattening as the root cause.** The row-label failures traced to PDF text extraction
+  collapsing grids into vertical token streams. **Handling:** row/cell reconstruction from word
+  coordinates plus gutter detection (`app/tables.py`). Evidence validation on page 52 went from
+  **2/17 (12%) to 11/13 (85%)**.
+
+- **A cache that served results the pipeline would no longer produce.** After extraction changed,
+  re-uploading a page *to measure the improvement* returned the old facts, because the file's bytes
+  hadn't changed and document-level dedup runs before chunking. **Handling:** a pipeline
+  fingerprint now participates in reuse, covering what determines extraction output and excluding
+  what doesn't.
+
+- **A regression I introduced, caught by re-testing rather than by tests.** Adding period/scope
+  determinations to the judge prompt broke Case 1: the block appended "a material difference would
+  not be explained by context" whenever periods matched — *including when the values agreed to
+  0.006%*. Case 1 went from `corroborates` to `contradicts`. **Handling:** the block now takes the
+  value verdict and says nothing about explaining a difference when there isn't one. This was
+  invisible to a test suite that mocks the LLM, and only surfaced because the required cases were
+  re-run against the current implementation instead of assumed still passing.
+
+- **A recovery mechanism that destroyed what it was meant to recover — twice.** Orphaned-job
+  cleanup was first called from `db.init_db()`, so a shell query killed a running extraction. Adding
+  a once-per-process guard didn't help: running the test suite starts a FastAPI `TestClient`, which
+  fires the startup hook, which swept the live job again. **Handling:** orphan detection is now
+  based on staleness of the last progress write, which is the only signal correct across processes.
+
+- **JSON recovery that produced the wrong type instead of failing.** `_extract_json_block`
+  preferred `[` over `{`, so a malformed object whose strings contained a bracket was carved into
+  that fragment — `{"reason": "values [1] and [2] differ",}` became `[1]`, which parses cleanly to
+  a list, so callers died on `.get()` with an `AttributeError` rather than the `LLMParseError` they
+  handle. **Handling:** take whichever delimiter opens first, and track string literals so brackets
+  inside quotes are data.
+
+#### Found earlier
 
 - **Relationship-classification false positives on same-page, same-subject facts.** The clearest
   failure found: the reasoning model classified "Mr. Sahil Barua... is liable to retire by
