@@ -162,6 +162,31 @@ def _nearest_power_of_ten_factor(ratio: float) -> Optional[float]:
     return None
 
 
+# Facts whose value isn't itself evidenced must not feed this module.
+# The entire argument this module makes is "these numbers satisfy an
+# identity they didn't have to satisfy, which is independent evidence
+# they were read correctly" -- that only holds if the inputs were
+# verified to begin with. A fact whose quote never actually supports its
+# value (see app/evidence.py: "ungrounded", or "quote_grounded" without
+# validation -- e.g. a circular quote that just restates the number)
+# would let an unverified figure pose as ground truth here, exactly
+# backwards from what the module exists to establish: it could produce a
+# false "scale anomaly" that's really just a wrong value, or worse, a
+# coincidental identity that manufactures false confidence in a number
+# nothing ever confirmed.
+#
+# A fact with no evidence_status at all -- the field missing entirely,
+# rather than an explicit negative status -- is still included. That
+# covers a fact dict built directly (tests, or any future caller not
+# routed through the evidence check), which is "not yet assessed", not
+# "known bad".
+_EXCLUDED_EVIDENCE_STATUSES = {"ungrounded", "quote_grounded"}
+
+
+def _is_evidenced(fact: dict) -> bool:
+    return fact.get("evidence_status") not in _EXCLUDED_EVIDENCE_STATUSES
+
+
 def check_arithmetic_consistency(facts: list[dict],
                                   tolerance_pct: float = DEFAULT_TOLERANCE_PCT) -> ArithmeticReport:
     """Searches extracted facts for additive identities and for near-misses
@@ -170,6 +195,8 @@ def check_arithmetic_consistency(facts: list[dict],
 
     groups: dict[tuple, list[dict]] = {}
     for fact in facts:
+        if not _is_evidenced(fact):
+            continue
         key = _group_key(fact)
         if key is None:
             continue

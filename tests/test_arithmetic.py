@@ -10,10 +10,10 @@ import pytest
 from app.arithmetic import check_arithmetic_consistency
 
 
-def _f(statement, value, unit="INR million", period="FY24", scope="consolidated"):
+def _f(statement, value, unit="INR million", period="FY24", scope="consolidated", evidence_status=None):
     return {
         "statement": statement, "value_numeric": value, "unit": unit,
-        "time_period": period, "scope": scope,
+        "time_period": period, "scope": scope, "evidence_status": evidence_status,
     }
 
 
@@ -176,3 +176,64 @@ class TestReportShape:
     def test_empty_input_is_safe(self):
         report = check_arithmetic_consistency([])
         assert report.identities == [] and report.facts_considered == 0
+
+
+class TestOnlyEvidencedFactsParticipate:
+    """Audited in after the evidence layer (app/evidence.py) was added:
+    this module was built before evidence_status existed and had no
+    awareness of it, so an ungrounded or circular-quote fact's value could
+    pose as ground truth here. That is exactly backwards from what the
+    module exists to establish -- "these numbers satisfy an identity they
+    didn't have to, which is independent evidence they were read
+    correctly" only holds if the inputs were verified to begin with.
+    """
+
+    def test_an_ungrounded_fact_is_excluded(self):
+        """"Other equity" is one addend of "share capital + other equity =
+        total equity"; losing it as ground truth must lose that identity.
+        The OTHER identity ("liabilities + equity = assets") doesn't
+        involve it and must still be found."""
+        facts = [dict(f) for f in BALANCE_SHEET]
+        for f in facts:
+            if f["statement"] == "Other equity":
+                f["evidence_status"] = "ungrounded"
+        report = check_arithmetic_consistency(facts)
+        described = " ".join(i.describe() for i in report.identities)
+        assert "90709.7" not in described
+        assert len(report.identities) == 1
+
+    def test_a_circular_quote_fact_is_excluded(self):
+        """quote_grounded (without validation) covers the specific real
+        failure this was measured against: a quote that is only the value
+        itself ("90,709.67"), which restates the number rather than
+        evidencing it."""
+        facts = [dict(f) for f in BALANCE_SHEET]
+        for f in facts:
+            if f["statement"] == "Other equity":
+                f["evidence_status"] = "quote_grounded"
+        report = check_arithmetic_consistency(facts)
+        described = " ".join(i.describe() for i in report.identities)
+        assert "90709.7" not in described
+        assert len(report.identities) == 1
+
+    def test_a_fact_validated_fact_still_participates(self):
+        facts = [dict(f, evidence_status="fact_validated") for f in BALANCE_SHEET]
+        report = check_arithmetic_consistency(facts)
+        assert len(report.identities) == 2
+
+    def test_missing_evidence_status_is_treated_as_not_yet_assessed_not_bad(self):
+        """A fact dict built directly (every existing test in this file,
+        and any future caller not routed through the evidence check) has
+        no evidence_status at all -- that must not be silently treated as
+        disqualifying, or every prior test in this module would have
+        started failing."""
+        facts = [dict(f) for f in BALANCE_SHEET]
+        assert all(f.get("evidence_status") is None for f in facts)
+        report = check_arithmetic_consistency(facts)
+        assert len(report.identities) == 2
+
+    def test_excluded_facts_do_not_count_toward_facts_considered(self):
+        facts = [dict(f) for f in BALANCE_SHEET]
+        facts[0]["evidence_status"] = "ungrounded"
+        report = check_arithmetic_consistency(facts)
+        assert report.facts_considered == len(BALANCE_SHEET) - 1
