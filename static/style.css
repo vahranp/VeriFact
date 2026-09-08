@@ -422,6 +422,17 @@ h3.sec { font-size: 13px; font-weight: 650; letter-spacing: .02em; text-transfor
   .badge.b-uncertain { background: rgba(71,85,105,.25); color: #cbd5e1; border-color: #475569; }
 }
 
+/* related_but_not_comparable and insufficient_context: outputs of the
+   deterministic adjudicator (app/adjudication.py), not the model -- both
+   are findings, distinct from uncertain (semantic doubt) and from each
+   other (a structural unit mismatch vs. missing period/scope context). */
+.badge.b-related_but_not_comparable { background: #f3e8ff; color: #7c3aed; border-color: #ddd6fe; }
+.badge.b-insufficient_context { background: #cffafe; color: #0e7490; border-color: #a5f3fc; }
+@media (prefers-color-scheme: dark) {
+  .badge.b-related_but_not_comparable { background: rgba(124,58,237,.25); color: #d8b4fe; border-color: #7c3aed; }
+  .badge.b-insufficient_context { background: rgba(8,145,178,.25); color: #67e8f9; border-color: #0891b2; }
+}
+
 /* A user-requested stop, not a failure -- kept visually distinct from
    b-failed (red) so the documents list doesn't read "something broke"
    when the honest story is "someone chose to stop it". */

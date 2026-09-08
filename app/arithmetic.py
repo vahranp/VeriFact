@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Optional
 
+from app.context import parse_period
 from app.normalize import normalize_unit
 
 # Two values are "the same" for identity-discovery purposes within this
@@ -119,13 +120,37 @@ class ArithmeticReport:
     scale_anomalies: list[ScaleAnomaly] = field(default_factory=list)
     groups_checked: int = 0
     facts_considered: int = 0
+    # Groups that had more than MAX_GROUP_SIZE comparable facts and were
+    # truncated before searching -- surfaced rather than silently dropping
+    # facts 61+ with no signal that anything was capped.
+    groups_truncated: int = 0
 
     def summary(self) -> str:
+        cap_note = f", {self.groups_truncated} group(s) capped at {MAX_GROUP_SIZE} facts" if self.groups_truncated else ""
         return (
-            f"{self.facts_considered} numeric facts in {self.groups_checked} comparable groups: "
-            f"{len(self.identities)} arithmetic identities confirmed, "
+            f"{self.facts_considered} numeric facts in {self.groups_checked} comparable groups"
+            f"{cap_note}: {len(self.identities)} arithmetic identities confirmed, "
             f"{len(self.scale_anomalies)} probable scale/unit anomalies"
         )
+
+
+def _canonical_period_key(time_period) -> str:
+    """Reduces a period string to the same identity app/context.py already
+    uses for period comparison, so "FY24" and "FY2023-24" -- one period
+    written two ways -- land in the same arithmetic-comparable group
+    instead of two separate ones that can never be checked against each
+    other. Before this fix, arithmetic grouping and relationship context
+    comparison disagreed about what counts as "the same period", even
+    though both exist in this codebase specifically to answer that
+    question. Falls back to the raw lowercased string when the period
+    can't be parsed -- a coarser key, but still a valid (if less
+    generous) grouping, consistent with this module's practice elsewhere
+    of refusing to guess rather than inventing a false match."""
+    raw = (time_period or "").strip().lower()
+    period = parse_period(time_period)
+    if period is None or period.year is None:
+        return raw
+    return f"{period.kind}:{period.year}:{period.quarter}:{period.half}"
 
 
 def _group_key(fact: dict) -> Optional[tuple]:
@@ -137,7 +162,7 @@ def _group_key(fact: dict) -> Optional[tuple]:
         return None  # percentages don't sum meaningfully
     return (
         norm.base_unit,
-        (fact.get("time_period") or "").strip().lower(),
+        _canonical_period_key(fact.get("time_period")),
         (fact.get("scope") or "").strip().lower(),
     )
 
@@ -210,7 +235,9 @@ def check_arithmetic_consistency(facts: list[dict],
     for key, group in groups.items():
         if len(group) < 3:
             continue
-        group = group[:MAX_GROUP_SIZE]
+        if len(group) > MAX_GROUP_SIZE:
+            report.groups_truncated += 1
+            group = group[:MAX_GROUP_SIZE]
         report.groups_checked += 1
         unit = key[0]
 

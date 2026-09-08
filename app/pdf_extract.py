@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import fitz  # PyMuPDF
 
 from app.config import MAX_CHUNK_CHARS, CHUNK_OVERLAP_CHARS, MIN_PAGE_CHARS
-from app.tables import layout_aware_text
+from app.tables import PLAIN_NOT_TABULAR, layout_aware_text
 
 
 @dataclass
@@ -30,6 +30,14 @@ class Chunk:
     # and let a quote "ground" against context the chunk doesn't really
     # contain.
     page_context: str = ""
+    # See app/tables.py::layout_aware_text -- whether this chunk's text is
+    # layout-reconstructed, plain because the page was never tabular, or
+    # plain because reconstruction was tried and rejected (the risky case:
+    # the model sees the same flattened-grid text that originally caused
+    # row-label extraction errors, with nothing marking it as different).
+    # Stamped onto every fact extracted from this chunk -- see
+    # app/fact_extraction.py.
+    table_context: str = PLAIN_NOT_TABULAR
 
 
 # How much of a page's opening text to carry into its later chunks. Small
@@ -57,9 +65,12 @@ def is_encrypted(pdf_path: str) -> bool:
         doc.close()
 
 
-def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
-    """Returns [(page_number, text), ...] for every non-trivial, readable
-    page.
+def _extract_pages_with_table_context(pdf_path: str) -> list[tuple[int, str, str]]:
+    """Like extract_pages below, but also reports each page's table_context
+    (see app/tables.py::layout_aware_text). Kept as a separate, internal
+    function so extract_pages' public (page_number, text) shape -- used by
+    has_extractable_text and a few debug scripts -- doesn't change for
+    callers that have no use for the extra field.
 
     Table-like pages are reconstructed from word coordinates rather than
     taken in reading order (see app/tables.py): flattening a grid into a
@@ -83,15 +94,22 @@ def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
         for i in range(len(doc)):
             try:
                 page = doc.load_page(i)
-                text, _used_layout = layout_aware_text(page)
+                text, table_context = layout_aware_text(page)
             except Exception:  # noqa: BLE001 - one unreadable page must not sink the document
                 continue
             text = text.strip()
             if len(text) >= MIN_PAGE_CHARS:
-                pages.append((i + 1, text))
+                pages.append((i + 1, text, table_context))
         return pages
     finally:
         doc.close()
+
+
+def extract_pages(pdf_path: str) -> list[tuple[int, str]]:
+    """Returns [(page_number, text), ...] for every non-trivial, readable
+    page. See _extract_pages_with_table_context for the table-context-
+    carrying version this delegates to."""
+    return [(page_number, text) for page_number, text, _table_context in _extract_pages_with_table_context(pdf_path)]
 
 
 def has_extractable_text(pdf_path: str) -> bool:
@@ -121,7 +139,7 @@ def _page_context(text: str) -> str:
     return head.strip()
 
 
-def chunk_page(page_number: int, text: str) -> list[Chunk]:
+def chunk_page(page_number: int, text: str, table_context: str = PLAIN_NOT_TABULAR) -> list[Chunk]:
     """Splits an over-long page into overlapping windows. Most pages of the
     starter PDFs fit in one chunk; this only kicks in for very dense pages
     or, more importantly, for large PDFs we haven't seen yet.
@@ -129,9 +147,11 @@ def chunk_page(page_number: int, text: str) -> list[Chunk]:
     Chunks after the first carry the page's opening lines as separate
     `page_context` (see Chunk) so table denominations and headings stated
     once at the top of a page are still available when interpreting rows
-    further down it."""
+    further down it. table_context is the same for every chunk of one
+    page -- it describes the whole page's extraction, not a sub-window
+    of it."""
     if len(text) <= MAX_CHUNK_CHARS:
-        return [Chunk(page_number, text)]
+        return [Chunk(page_number, text, table_context=table_context)]
 
     context = _page_context(text)
     chunks = []
@@ -139,7 +159,8 @@ def chunk_page(page_number: int, text: str) -> list[Chunk]:
     while start < len(text):
         end = min(start + MAX_CHUNK_CHARS, len(text))
         # The first chunk already contains the header inline; later ones don't.
-        chunks.append(Chunk(page_number, text[start:end], "" if start == 0 else context))
+        chunks.append(Chunk(page_number, text[start:end], "" if start == 0 else context,
+                             table_context=table_context))
         if end == len(text):
             break
         start = end - CHUNK_OVERLAP_CHARS
@@ -148,8 +169,8 @@ def chunk_page(page_number: int, text: str) -> list[Chunk]:
 
 def extract_chunks(pdf_path: str) -> list[Chunk]:
     chunks: list[Chunk] = []
-    for page_number, text in extract_pages(pdf_path):
-        chunks.extend(chunk_page(page_number, text))
+    for page_number, text, table_context in _extract_pages_with_table_context(pdf_path):
+        chunks.extend(chunk_page(page_number, text, table_context))
     return chunks
 
 

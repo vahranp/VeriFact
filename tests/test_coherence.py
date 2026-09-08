@@ -53,6 +53,66 @@ class TestImpossibleTriangles:
         assert {e["id"] for e in violation.edges} == {1, 2, 3}
 
 
+class TestStrictProofDistinguishesDeterministicFromModelOnlyEquality:
+    """corroborates only means numeric equality when a deterministic check
+    actually confirmed it -- a corroborates edge resting purely on the
+    model's own qualitative "same status" reading (decision_source
+    llm_unchecked) makes the triangle strong evidence of an error, but not
+    a strict mathematical proof the way a numerically-confirmed edge does."""
+
+    def _rel_with_source(self, rel_id, a, b, relation, decision_source):
+        r = _rel(rel_id, a, b, relation)
+        r["decision_source"] = decision_source
+        return r
+
+    def test_deterministically_confirmed_corroborates_edges_are_a_strict_proof(self):
+        rels = [
+            self._rel_with_source(1, 10, 20, "corroborates", "deterministic_confirmed"),
+            self._rel_with_source(2, 20, 30, "corroborates", "deterministic_override"),
+            _rel(3, 10, 30, "contradicts"),
+        ]
+        violation = check_coherence(rels).violations[0]
+        assert violation.is_strict_proof is True
+        assert "logically impossible" in violation.describe()
+        assert "model's own" not in violation.describe()
+
+    def test_llm_unchecked_corroborates_edges_are_not_a_strict_proof(self):
+        rels = [
+            self._rel_with_source(1, 10, 20, "corroborates", "llm_unchecked"),
+            self._rel_with_source(2, 20, 30, "corroborates", "deterministic_confirmed"),
+            _rel(3, 10, 30, "contradicts"),
+        ]
+        violation = check_coherence(rels).violations[0]
+        assert violation.is_strict_proof is False
+        assert "model's own" in violation.describe()
+
+    def test_edges_predating_the_adjudicator_are_treated_as_unchecked(self):
+        """No decision_source at all (a relationship stored before this
+        field existed) is the conservative case, not an assumed proof."""
+        rels = [
+            _rel(1, 10, 20, "corroborates"),
+            _rel(2, 20, 30, "corroborates"),
+            _rel(3, 10, 30, "contradicts"),
+        ]
+        assert check_coherence(rels).violations[0].is_strict_proof is False
+
+    def test_a_triangle_with_no_corroborates_edge_is_vacuously_a_strict_proof(self):
+        """is_strict_proof only constrains equality edges -- a triangle of
+        three inequality-only edges (see test_three_mutually_contradicting_facts_are_fine)
+        never reaches a violation at all, but the property itself must not
+        require an equality edge to exist to be true."""
+        rels = [
+            self._rel_with_source(1, 10, 20, "reconciled", "deterministic_override"),
+            self._rel_with_source(2, 20, 30, "reconciled", "deterministic_override"),
+            self._rel_with_source(3, 10, 30, "reconciled", "deterministic_override"),
+        ]
+        # Three inequalities is a satisfiable pattern -- no violation to
+        # inspect -- so this checks the Violation dataclass directly.
+        from app.coherence import Violation
+        v = Violation(fact_ids=(10, 20, 30), edges=rels, suspect=rels[0], reason="")
+        assert v.is_strict_proof is True
+
+
 class TestSatisfiablePatternsAreLeftAlone:
     """Only one of the four triangle patterns is impossible. Flagging any
     of the others would inflate the error estimate into noise."""

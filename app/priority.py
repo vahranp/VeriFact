@@ -84,8 +84,24 @@ def score_relationship(rel: dict, implicated_edge_ids: set) -> PriorityScore:
     elif relation == "uncertain":
         reasons.append("evidence did not settle how these facts relate")
         score += 25
+    elif relation == "insufficient_context":
+        reasons.append("values differ, but period or scope didn't establish whether that explains it")
+        score += 20
     elif relation == "reconciled":
         score += 4  # already explained; lowest live priority, not noise
+    elif relation == "related_but_not_comparable":
+        score += 2  # a finding, but neither an agreement nor a conflict
+
+    # A relationship where app/adjudication.py overrode the model's own
+    # proposal is exactly the case a reviewer should see -- the system
+    # caught its own LLM disagreeing, independent of what the final label
+    # turned out to be. Always pushes at least into HIGH.
+    if rel.get("disagreement"):
+        reasons.append(
+            f"the deterministic adjudicator overrode the model's proposal of "
+            f"'{rel.get('llm_proposal')}' -- worth a second look regardless of the final label"
+        )
+        score += 35
 
     if not reasons:
         reasons.append("no elevated signal")

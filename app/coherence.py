@@ -21,9 +21,20 @@ logically possible:
     E E N   IMPOSSIBLE -- A = B and B = C, yet A != C
 
 That last pattern cannot occur in a correct graph. When it appears, at
-least one of those three LLM judgments is provably wrong -- and we know
-this without a ground-truth label, without a human reviewer, and without
-spending a single additional LLM call.
+least one of those three judgments is wrong -- and we know this without a
+ground-truth label, without a human reviewer, and without spending a
+single additional LLM call. That is a strict, mathematical proof PROVIDED
+`corroborates` actually means numeric equality on the edges involved.
+Where app/adjudication.py deterministically confirmed or forced that
+equality from the values themselves (decision_source
+"deterministic_confirmed"/"deterministic_override"), it is. Where a
+`corroborates` edge instead rests entirely on the model's own qualitative
+reading, with no number to check it against (decision_source
+"llm_unchecked" -- e.g. two non-numeric facts judged to "assert the same
+status"), the triangle is still strong evidence something is wrong, but
+calling it a mathematical proof would overstate what a same-status
+*judgment* establishes versus a same-*value* computation. Violation.describe()
+reports which case applies for a given triangle.
 
 Two things fall out of it:
 
@@ -73,10 +84,28 @@ class Violation:
     suspect: dict                      # the edge most likely to be the wrong one
     reason: str
 
+    @property
+    def is_strict_proof(self) -> bool:
+        """True only when every equality (corroborates) edge in this
+        triangle rests on a deterministic numeric check (confirmed or
+        forced by app/adjudication.py), not merely the model's own
+        qualitative reading. See the module docstring for why that
+        distinction matters to how strongly "cannot all hold" should be
+        read. Edges predating the adjudicator (decision_source is null)
+        are treated as unchecked, the more conservative assumption."""
+        return all(
+            e.get("decision_source") in ("deterministic_confirmed", "deterministic_override")
+            for e in self.edges if e.get("relation_type") == "corroborates"
+        )
+
     def describe(self) -> str:
         labels = " + ".join(sorted(e["relation_type"] for e in self.edges))
+        strength = (
+            "logically impossible" if self.is_strict_proof
+            else "logically impossible under the model's own equality judgments"
+        )
         return (
-            f"facts {self.fact_ids}: {labels} cannot all hold. "
+            f"facts {self.fact_ids}: {labels} cannot all hold ({strength}). "
             f"Most likely wrong: relationship {self.suspect.get('id')} "
             f"({self.suspect.get('relation_type')}, "
             f"confidence {self.suspect.get('confidence')})"

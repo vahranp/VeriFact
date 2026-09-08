@@ -44,6 +44,16 @@ DIFFERENT = "different"
 OVERLAPPING = "overlapping"
 UNKNOWN = "unknown"
 
+# Periods anchored to an explicit calendar date rather than a fiscal-year
+# label. Two facts sharing one of these kinds are compared by exact date,
+# not by year alone.
+_DATE_ANCHORED_KINDS = {"as_of", "period_end"}
+# "period_end" ("year ended March 31, 2024") is a flow/period measurement,
+# the same kind of thing a fiscal year is -- just dated by an explicit
+# end-date instead of a label. Grouped with fiscal_year for the "which
+# window, exactly" ambiguity check against a bare calendar year below.
+_FISCAL_LIKE_KINDS = {"fiscal_year", "period_end"}
+
 _MONTHS = {
     "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
     "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
@@ -90,6 +100,8 @@ class Period:
             return f"H{self.half} {self.year}" if self.year else f"H{self.half}"
         if self.kind == "as_of":
             return f"as of {self.year}-{self.month:02d}-{self.day:02d}" if self.day else f"as of {self.year}-{self.month:02d}"
+        if self.kind == "period_end":
+            return f"year ended {self.year}-{self.month:02d}-{self.day:02d}" if self.day else f"period ended {self.year}-{self.month:02d}"
         if self.kind == "relative":
             return f"relative period ('{self.label}') -- cannot be resolved without a reporting date"
         return f"{'FY' if self.kind == 'fiscal_year' else ''}{self.year}"
@@ -154,10 +166,9 @@ def parse_period(text: Optional[str]) -> Optional[Period]:
             return Period(label=raw, kind="half_year", half=half_num,
                           year=int(year.group(0)) if year else None)
 
-    # "as of March 31, 2024" / "as at 31 March 2024" / "ended 31.03.2024"
-    as_of = re.search(
-        r"\b(?:as\s+(?:of|at|on)|ended|ending|year\s+ended)\b(.*)$", s
-    )
+    # "as of March 31, 2024" / "as at 31 March 2024" -- a true point-in-time
+    # snapshot (a balance, a headcount, a stock price at a moment).
+    as_of = re.search(r"\bas\s+(?:of|at|on)\b(.*)$", s)
     if as_of:
         tail = as_of.group(1)
         month_name = re.search(r"\b(" + "|".join(_MONTHS) + r")\b", tail)
@@ -165,6 +176,28 @@ def parse_period(text: Optional[str]) -> Optional[Period]:
         day = re.search(r"\b(\d{1,2})\b", tail)
         if month_name and year:
             return Period(label=raw, kind="as_of", year=int(year.group(1)),
+                          month=_MONTHS[month_name.group(1)],
+                          day=int(day.group(1)) if day and int(day.group(1)) <= 31 else None)
+
+    # "year ended 31 March 2024" / "ended 31.03.2024" / "ending June 30" --
+    # a PERIOD whose end-date is spelled out explicitly, rather than named
+    # by a fiscal-year label. This is a flow/period measurement, the same
+    # kind of thing as a fiscal year, NOT a point-in-time snapshot -- kept
+    # as its own kind ("period_end") rather than folded into "as_of",
+    # which it used to be. "Revenue for the year ended March 31, 2024" and
+    # "cash balance as of March 31, 2024" share a calendar anchor but
+    # report fundamentally different things (a twelve-month total vs. a
+    # balance at an instant); merging them into one kind meant
+    # compare_periods could call them SAME purely because the dates
+    # matched, silently erasing that distinction.
+    period_end = re.search(r"\b(?:year\s+)?end(?:ed|ing)\b(.*)$", s)
+    if period_end:
+        tail = period_end.group(1)
+        month_name = re.search(r"\b(" + "|".join(_MONTHS) + r")\b", tail)
+        year = re.search(r"\b(\d{4})\b", tail)
+        day = re.search(r"\b(\d{1,2})\b", tail)
+        if month_name and year:
+            return Period(label=raw, kind="period_end", year=int(year.group(1)),
                           month=_MONTHS[month_name.group(1)],
                           day=int(day.group(1)) if day and int(day.group(1)) <= 31 else None)
 
@@ -195,6 +228,16 @@ def parse_period(text: Optional[str]) -> Optional[Period]:
 class Comparison:
     relation: str      # SAME | DIFFERENT | OVERLAPPING | UNKNOWN
     detail: str
+    # Which real-world dimension this verdict is actually about: "time" for
+    # compare_periods, and for compare_scopes either "scope" (which entity/
+    # slice/operations are covered) or "basis" (how the figure was measured
+    # or reported -- actual vs forecast, current vs restated). Kept as a
+    # label rather than a hard split into separate fields because a scope
+    # string can legitimately carry both ("consolidated actual") -- this
+    # only records which one a DIFFERENT/SAME verdict was decided on, for a
+    # caller (the relationship adjudicator) that wants to say "these differ
+    # in basis, not scope" rather than a single undifferentiated verdict.
+    dimension: str = "scope"
 
     @property
     def distinguishing(self) -> bool:
@@ -224,21 +267,22 @@ def compare_periods(a: Optional[str], b: Optional[str]) -> Comparison:
     if pa is None or pb is None:
         missing = "both facts" if pa is None and pb is None else ("fact A" if pa is None else "fact B")
         if not a and not b:
-            return Comparison(UNKNOWN, "neither fact states a reporting period")
-        return Comparison(UNKNOWN, f"the reporting period of {missing} could not be determined")
+            return Comparison(UNKNOWN, "neither fact states a reporting period", dimension="time")
+        return Comparison(UNKNOWN, f"the reporting period of {missing} could not be determined", dimension="time")
 
     if pa.kind == "relative" or pb.kind == "relative":
         return Comparison(
             UNKNOWN,
             f"a period is stated only relative to an unstated reporting date "
             f"('{pa.label}' vs '{pb.label}'), so they cannot be aligned",
+            dimension="time",
         )
 
     if pa.year is None or pb.year is None:
-        return Comparison(UNKNOWN, "a period names no year, so the two cannot be aligned")
+        return Comparison(UNKNOWN, "a period names no year, so the two cannot be aligned", dimension="time")
 
     if pa.year != pb.year:
-        return Comparison(DIFFERENT, f"different periods: {pa.describe()} vs {pb.describe()}")
+        return Comparison(DIFFERENT, f"different periods: {pa.describe()} vs {pb.describe()}", dimension="time")
 
     # Same year, but a quarter or half is not its own annual figure --
     # generalized so quarters and halves are handled by one rule rather
@@ -247,10 +291,10 @@ def compare_periods(a: Optional[str], b: Optional[str]) -> Comparison:
     if sub_a is not None or sub_b is not None:
         if sub_a is not None and sub_b is not None:
             if sub_a == sub_b:
-                return Comparison(SAME, f"same period: {pa.describe()}")
+                return Comparison(SAME, f"same period: {pa.describe()}", dimension="time")
             if sub_a[0] == sub_b[0]:
                 label = sub_a[0].replace("_", "-")
-                return Comparison(DIFFERENT, f"different {label}s: {pa.describe()} vs {pb.describe()}")
+                return Comparison(DIFFERENT, f"different {label}s: {pa.describe()} vs {pb.describe()}", dimension="time")
         # Either mismatched granularities (a quarter against a half) or
         # one subdivision against the whole year -- in both cases the
         # smaller window sits inside the larger one, so a numeric gap is
@@ -259,36 +303,71 @@ def compare_periods(a: Optional[str], b: Optional[str]) -> Comparison:
             OVERLAPPING,
             f"{pa.describe()} and {pb.describe()} are different-sized slices of the year "
             f"-- the smaller falls inside the larger, so the figures are not expected to match",
+            dimension="time",
         )
 
-    # A fiscal year and a calendar year sharing a label overlap but are not
-    # the same window.
-    if {pa.kind, pb.kind} == {"fiscal_year", "calendar_year"}:
+    # A fiscal-style period (a labeled fiscal year, or a period ending on
+    # an explicit date) and a bare calendar year of the same number overlap
+    # but are not confirmed to be the same window.
+    if (pa.kind in _FISCAL_LIKE_KINDS and pb.kind == "calendar_year") or (
+        pb.kind in _FISCAL_LIKE_KINDS and pa.kind == "calendar_year"
+    ):
         return Comparison(
             OVERLAPPING,
-            f"a fiscal year and a calendar year of the same number ({pa.describe()} vs "
+            f"a fiscal-style period and a calendar year of the same number ({pa.describe()} vs "
             f"{pb.describe()}) cover overlapping but different windows",
+            dimension="time",
         )
 
-    if pa.kind == "as_of" and pb.kind == "as_of":
-        if (pa.month, pa.day) == (pb.month, pb.day):
-            return Comparison(SAME, f"same date: {pa.describe()}")
-        return Comparison(DIFFERENT, f"different dates: {pa.describe()} vs {pb.describe()}")
+    # A point-in-time snapshot (as_of) and an explicit period-end date
+    # (period_end) can be anchored to the identical calendar date and still
+    # not be the same KIND of measurement: "cash balance as of March 31,
+    # 2024" is an instant, "revenue for the year ended March 31, 2024" is a
+    # twelve-month total. Checked together (not just when both are as_of)
+    # so the cross case -- one snapshot, one explicit period-end, same
+    # date -- is caught too, not just genuine as_of-vs-as_of pairs.
+    if pa.kind in _DATE_ANCHORED_KINDS and pb.kind in _DATE_ANCHORED_KINDS:
+        if (pa.month, pa.day) != (pb.month, pb.day):
+            return Comparison(DIFFERENT, f"different dates: {pa.describe()} vs {pb.describe()}", dimension="time")
+        if pa.kind == pb.kind:
+            return Comparison(SAME, f"same date: {pa.describe()}", dimension="time")
+        return Comparison(
+            OVERLAPPING,
+            f"{pa.describe()} and {pb.describe()} share a calendar date, but one is a "
+            f"point-in-time snapshot and the other is a period ending on that date -- a balance "
+            f"is not expected to equal a flow accumulated over the period ending on it",
+            dimension="time",
+        )
 
-    return Comparison(SAME, f"same period: {pa.describe()}")
+    return Comparison(SAME, f"same period: {pa.describe()}", dimension="time")
 
 
-# Contrastive qualifier pairs. Membership of opposite sides is what makes
-# two scopes incompatible; a qualifier appearing in neither list is still
-# compared as a plain token, so an unfamiliar domain's vocabulary is not
-# silently dropped.
-_CONTRASTS = [
-    {"consolidated", "group"}, {"standalone", "separate", "company", "entity"},
-    {"gross"}, {"net"},
-    {"continuing"}, {"discontinued"},
-    {"current"}, {"historical", "prior", "restated"},
-    {"annual", "yearly"}, {"quarterly", "interim"},
-    {"actual", "reported"}, {"estimated", "forecast", "projected", "budgeted"},
+# Contrastive qualifier axes. Each axis is a tuple of 2+ mutually
+# contrasting sides; a qualifier from one side of an axis contradicts a
+# qualifier from a DIFFERENT side of the SAME axis. Qualifiers from
+# different axes are orthogonal, not contrasting -- "gross" (this axis)
+# and "actual" (a different axis) do not contradict each other; a figure
+# can be gross AND actual at the same time. An earlier version of this
+# module checked every group in a flat list against every OTHER group
+# regardless of axis, so "gross" vs "actual" (and "consolidated" vs
+# "forecast", etc.) were wrongly reported as contrasting scopes. That
+# mattered more once a deterministic scope verdict gained the authority to
+# override an LLM's relationship judgment (see app/adjudication.py) --
+# advisory-only text can survive being occasionally wrong; a hard override
+# cannot.
+#
+# "scope" axes describe WHICH entity/operations/slice is covered. "basis"
+# axes describe HOW a figure was measured or reported. The distinction is
+# a labeling convenience for callers that want to say "these differ in
+# basis, not scope" (see Comparison.dimension) -- not a claim that every
+# qualifier cleanly belongs to exactly one or the other.
+_AXES: list[tuple[str, tuple[set, ...]]] = [
+    ("scope", ({"consolidated", "group"}, {"standalone", "separate", "company", "entity"})),
+    ("scope", ({"gross"}, {"net"})),
+    ("scope", ({"continuing"}, {"discontinued"})),
+    ("scope", ({"annual", "yearly"}, {"quarterly", "interim"})),
+    ("basis", ({"current"}, {"historical", "prior", "restated"})),
+    ("basis", ({"actual", "reported"}, {"estimated", "forecast", "projected", "budgeted"})),
 ]
 
 _SCOPE_STOP = {"the", "a", "an", "of", "for", "in", "on", "at", "to", "and",
@@ -306,37 +385,43 @@ def compare_scopes(a: Optional[str], b: Optional[str]) -> Comparison:
     """Do these two scope strings describe the same reporting scope?"""
     ta, tb = scope_tokens(a), scope_tokens(b)
     if not ta or not tb:
-        return Comparison(UNKNOWN, "at least one fact does not state a scope")
+        return Comparison(UNKNOWN, "at least one fact does not state a scope", dimension="scope")
 
     if ta == tb:
-        return Comparison(SAME, f"same scope: {', '.join(sorted(ta))}")
+        return Comparison(SAME, f"same scope: {', '.join(sorted(ta))}", dimension="scope")
 
-    # Opposite sides of a known contrast make the scopes incompatible.
-    for i, left in enumerate(_CONTRASTS):
-        for right in _CONTRASTS[i + 1:]:
-            if (ta & left and tb & right) or (ta & right and tb & left):
-                return Comparison(
-                    DIFFERENT,
-                    f"contrasting scopes: '{', '.join(sorted(ta & (left | right)))}' vs "
-                    f"'{', '.join(sorted(tb & (left | right)))}'",
-                )
+    # Opposite sides of a known axis make the scopes incompatible on that
+    # axis specifically -- checked axis-by-axis, never across axes.
+    for dimension, sides in _AXES:
+        for i, left in enumerate(sides):
+            for right in sides[i + 1:]:
+                if (ta & left and tb & right) or (ta & right and tb & left):
+                    return Comparison(
+                        DIFFERENT,
+                        f"contrasting {dimension}: '{', '.join(sorted(ta & (left | right)))}' vs "
+                        f"'{', '.join(sorted(tb & (left | right)))}'",
+                        dimension=dimension,
+                    )
 
-    # Different words drawn from the same side of a contrast are synonyms,
+    # Different words drawn from the same side of an axis are synonyms,
     # not a difference -- "consolidated" and "group" name one scope.
-    for group in _CONTRASTS:
-        if ta & group and tb & group:
-            return Comparison(
-                SAME,
-                f"equivalent scopes: '{', '.join(sorted(ta & group))}' and "
-                f"'{', '.join(sorted(tb & group))}' describe the same scope",
-            )
+    for dimension, sides in _AXES:
+        for side in sides:
+            if ta & side and tb & side:
+                return Comparison(
+                    SAME,
+                    f"equivalent {dimension}: '{', '.join(sorted(ta & side))}' and "
+                    f"'{', '.join(sorted(tb & side))}' describe the same {dimension}",
+                    dimension=dimension,
+                )
 
     if ta & tb:
         return Comparison(
             OVERLAPPING,
             f"scopes partly agree ('{', '.join(sorted(ta & tb))}') but are not identical",
+            dimension="scope",
         )
-    return Comparison(DIFFERENT, f"different scopes: '{a}' vs '{b}'")
+    return Comparison(DIFFERENT, f"different scopes: '{a}' vs '{b}'", dimension="scope")
 
 
 def format_context_for_prompt(period: Comparison, scope: Comparison,

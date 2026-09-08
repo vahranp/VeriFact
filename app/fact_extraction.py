@@ -10,11 +10,12 @@ import re
 from app import db
 from app.cache import hash_text
 from app.evidence import check_evidence
-from app.normalize import parse_locale_number
+from app.normalize import extract_number_tokens
 from app.schemas import validate_facts
 from app.config import EXTRACTION_MODEL, EXTRACTION_TIMEOUT_SECONDS
 from app.llm_client import chat_json, LLMError, LLMParseError
 from app.pdf_extract import Chunk
+from app.tables import PLAIN_RECONSTRUCTION_REJECTED
 
 SYSTEM_PROMPT = """You are a precise fact-extraction engine. You read one page (or page \
 fragment) from an arbitrary document -- it could be a financial filing, a report, a \
@@ -61,41 +62,30 @@ _NULLISH = {"null", "none", "n/a", "na", ""}
 # "12.7%", "1.4") even though `value` clearly states a number and `unit`
 # separately carries the scale word. Rather than trust the model's own
 # value_numeric field when it's missing, fall back to parsing the number
-# straight out of `value` -- this is exactly the kind of deterministic
-# parsing that shouldn't be left to chance in an unassisted LLM field.
+# straight out of `value` via extract_number_tokens (app/normalize.py),
+# which prefers a parenthesized accounting-negative over a coincidental
+# plain number elsewhere in the same string.
 #
-# Checked as a parenthesized accounting-negative first ("(452)", "(6.3%)"
-# -- note the number sits *before* a trailing "%" and *then* the closing
-# paren, so the parenthesis check can't just look for the number
-# immediately followed by ")"), falling back to a plain signed number.
-#
-# Matches a full number token under EITHER separator convention: a run of
-# digit/dot/comma characters that starts and ends on a digit. The earlier
-# version of this pattern (`[\d,]*\.?\d+`, at most one dot) truncated a
-# European-style multi-group number like "12.345.678" at the first dot,
-# silently reading it as "12.345" -- wrong by three orders of magnitude,
-# with the rest of the digits discarded rather than flagged.
-_PAREN_NUMBER = re.compile(r"\(\s*-?\d[\d.,]*\d?\s*%?\s*\)")
-_PLAIN_NUMBER = re.compile(r"-?\d[\d.,]*\d?")
+# A `value` field is sometimes not a number at all but a period label the
+# model put in the wrong field ("FY2024") -- extracting "2024" out of that
+# as a fabricated value_numeric would be worse than leaving it null, so
+# this is checked and refused first, narrowly: only when the ENTIRE string
+# is just a period-shaped label, not merely a string that happens to
+# contain "fy" somewhere.
+_PERIOD_LABEL_ONLY = re.compile(
+    r"^\s*(?:fy|q[1-4]|h[12]|fiscal(?:\s+year)?|quarter)\s*\d{2,4}(?:[-/]\d{2,4})?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _numeric_fallback(value) -> float | None:
     if value is None:
         return None
     s = str(value)
-
-    paren_match = _PAREN_NUMBER.search(s)
-    if paren_match:
-        inner = _PLAIN_NUMBER.search(paren_match.group(0))
-        if inner:
-            parsed = parse_locale_number(inner.group(0))
-            if parsed is not None:
-                return -abs(parsed)
-
-    plain_match = _PLAIN_NUMBER.search(s)
-    if not plain_match:
+    if _PERIOD_LABEL_ONLY.match(s):
         return None
-    return parse_locale_number(plain_match.group(0))
+    tokens = extract_number_tokens(s)
+    return tokens[0] if tokens else None
 
 
 def _clean(value):
@@ -186,6 +176,21 @@ def _reground_quote(fact_statement: str, page_text: str) -> str | None:
 
 
 
+def _evidence_detail(fact: dict, check) -> str:
+    """The evidence description, plus a note when the fact came from a
+    page whose table reconstruction was rejected (see
+    app/tables.py::PLAIN_RECONSTRUCTION_REJECTED) -- a quote can be
+    perfectly grounded and still sit in a row/column the model had to
+    guess the alignment of."""
+    detail = check.describe()
+    if fact.get("table_context") == PLAIN_RECONSTRUCTION_REJECTED:
+        detail += (
+            "; extracted from a page whose table reconstruction was rejected, so its "
+            "row/column alignment is not independently confirmed"
+        )
+    return detail
+
+
 def _apply_evidence(facts: list[dict]) -> list[dict]:
     """Stamps evidence_status/evidence_detail onto facts.
 
@@ -198,12 +203,12 @@ def _apply_evidence(facts: list[dict]) -> list[dict]:
         fact = dict(fact)
         check = check_evidence(fact, bool(fact.get("quote_grounded", True)))
         fact["evidence_status"] = check.status
-        fact["evidence_detail"] = check.describe()
+        fact["evidence_detail"] = _evidence_detail(fact, check)
         out.append(fact)
     return out
 
 
-def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dict], list[dict], bool]:
+def extract_facts_from_chunk(chunk: Chunk) -> tuple[list[dict], list[dict], bool]:
     """Returns (facts, issues, cache_hit). `facts` have a 'quote_grounded'
     bool added. `issues` are dicts ready to hand to
     db.insert_issue (issue_type/detail/raw_excerpt).
@@ -227,6 +232,21 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
         return _apply_evidence(cached["facts"]), cached["issues"], True
 
     issues: list[dict] = []
+    if chunk.table_context == PLAIN_RECONSTRUCTION_REJECTED:
+        # The page looked tabular but reconstruction was rejected (see
+        # app/tables.py) -- the model is about to read the same flattened-
+        # grid text known to cause row-label misattribution, with no
+        # structural help. Recorded once per chunk (not per fact, which
+        # would be noisy) so it's inspectable rather than a silent risk.
+        issues.append({
+            "issue_type": "table_alignment_uncertain",
+            "detail": (
+                f"Page {chunk.page_number} looked tabular but layout reconstruction was rejected "
+                f"(an exception, or it lost too much content) -- facts extracted from this chunk "
+                f"see the same flattened-grid text known to cause row/column misattribution."
+            ),
+            "raw_excerpt": "",
+        })
     context_block = ""
     if chunk.page_context:
         context_block = (
@@ -236,8 +256,15 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
             "quote from it:\n"
             f"\"\"\"\n{chunk.page_context}\n\"\"\"\n\n"
         )
+    # The document's filename is deliberately never shown to the model --
+    # for the starter corpus it literally contains "delhivery", which would
+    # leak a domain/company prior into what's supposed to be a generic,
+    # per-page extraction call. Nothing about grounding or extraction
+    # quality depends on it: quotes are verified against chunk.text alone,
+    # and a fact's subject/statement is expected to come from the page text
+    # itself, not from the uploaded filename.
     user_prompt = (
-        f"Document: {document_name}\nPage: {chunk.page_number}\n\n"
+        f"Page: {chunk.page_number}\n\n"
         f"{context_block}"
         f"PAGE TEXT (extract facts from this section only):\n\"\"\"\n{chunk.text}\n\"\"\""
     )
@@ -325,6 +352,7 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
             "quote": quote,
             "quote_grounded": grounded,
             "confidence": item.get("confidence"),
+            "table_context": chunk.table_context,
         }
 
         # Second, stronger grounding question: the quote is real, but does
@@ -333,7 +361,7 @@ def extract_facts_from_chunk(chunk: Chunk, document_name: str) -> tuple[list[dic
         # label became the quote. See app/evidence.py.
         evidence = check_evidence(fact, grounded)
         fact["evidence_status"] = evidence.status
-        fact["evidence_detail"] = evidence.describe()
+        fact["evidence_detail"] = _evidence_detail(fact, evidence)
         if grounded and not evidence.validated:
             issues.append({
                 "issue_type": "value_not_evidenced",

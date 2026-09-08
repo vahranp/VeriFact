@@ -1,6 +1,9 @@
 const API = "";
 
-const C = { corroborates: "#059669", contradicts: "#dc2626", reconciled: "#d97706", uncertain: "#64748b", brand: "#4f46e5" };
+const C = {
+  corroborates: "#059669", contradicts: "#dc2626", reconciled: "#d97706", uncertain: "#64748b",
+  related_but_not_comparable: "#7c3aed", insufficient_context: "#0891b2", brand: "#4f46e5",
+};
 const DOC_COLORS = ["#4f46e5", "#0284c7", "#059669", "#d97706", "#db2777", "#7c3aed", "#0891b2", "#65a30d", "#e11d48", "#0d9488"];
 
 const I = {
@@ -19,6 +22,8 @@ const I = {
   zap: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
   timer: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M9 2h6"/></svg>`,
   stop: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>`,
+  help: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  scale: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="3" x2="12" y2="21"/><path d="M5 7h5l-3 6a3 3 0 0 0 6 0l-3-6"/><path d="M14 7h5l-3 6a3 3 0 0 0 6 0l-3-6"/><path d="M5 7l7-4 7 4"/></svg>`,
 };
 
 // ---------------- utils ----------------
@@ -60,7 +65,22 @@ function countUp(node, target, dur = 900) {
     if (p < 1) requestAnimationFrame(step);
   })(start);
 }
-function animateIn(root) {
+function animateIn(root, instant = false) {
+  // instant=true is for a live poll refresh of a panel already on screen --
+  // rebuilding it every 2s via innerHTML otherwise replayed the count-up,
+  // bar-fill and .rise fade-in animations on every tick (fresh DOM nodes
+  // each time), which is what actually read as continuous blinking, not
+  // just the loading skeleton it was paired with.
+  if (instant) {
+    root.querySelectorAll("[data-count]").forEach((n) => {
+      const target = parseFloat(n.dataset.count);
+      n.textContent = Number.isInteger(target) ? Math.round(target).toLocaleString() : target.toFixed(1);
+    });
+    root.querySelectorAll(".bar-f").forEach((b) => { b.style.width = b.dataset.w + "%"; });
+    root.querySelectorAll(".col-bar").forEach((b) => { b.style.height = b.dataset.h + "%"; });
+    root.querySelectorAll(".rise").forEach((n) => { n.style.animation = "none"; n.style.opacity = "1"; n.style.transform = "none"; });
+    return;
+  }
   root.querySelectorAll("[data-count]").forEach((n) => countUp(n, parseFloat(n.dataset.count)));
   requestAnimationFrame(() => {
     root.querySelectorAll(".bar-f").forEach((b, i) => setTimeout(() => { b.style.width = b.dataset.w + "%"; }, i * 45));
@@ -217,7 +237,7 @@ function paintChrome() {
     b.addEventListener("click", () => go(`document/${b.dataset.doc}`)));
 
   const opts = `<option value="">All documents</option>` + S.docs.map((d) => `<option value="${d.id}">${esc(docLabel(d))}</option>`).join("");
-  ["factDoc", "relDoc", "graphDocFilter"].forEach((id) => {
+  ["factDoc", "relDoc", "graphDocFilter", "prioDoc", "tlDoc", "cohDoc", "issueDoc"].forEach((id) => {
     const sel = $(id); if (!sel) return;
     const cur = sel.value; sel.innerHTML = opts; sel.value = cur;
   });
@@ -294,7 +314,10 @@ function renderOverview() {
     { label: "Corroborates", value: rt.corroborates || 0, color: C.corroborates },
     { label: "Contradicts", value: rt.contradicts || 0, color: C.contradicts },
     { label: "Reconciled", value: rt.reconciled || 0, color: C.reconciled },
-  ];
+    { label: "Uncertain", value: rt.uncertain || 0, color: C.uncertain },
+    { label: "Not comparable", value: rt.related_but_not_comparable || 0, color: C.related_but_not_comparable },
+    { label: "Insufficient context", value: rt.insufficient_context || 0, color: C.insufficient_context },
+  ].filter((x) => x.value > 0);
   const tot = segs.reduce((a, x) => a + x.value, 0) || 1;
   $("ovDonut").innerHTML = donut(segs);
   $("ovLegend").innerHTML = segs.map((x) => `<div class="lg">
@@ -318,9 +341,19 @@ function renderOverview() {
 
 let docPoll = null;
 
-async function renderDocument(id) {
+async function renderDocument(id, isPoll = false) {
   const host = $("docDetail");
-  host.innerHTML = `<div class="grid g4"><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div></div>`;
+  // Only show the loading skeleton on a genuine first load (navigating to
+  // this document). The 2s auto-refresh below used to call this exact same
+  // path, which wiped the whole panel back to a skeleton and rebuilt it
+  // from scratch every tick -- a fetch that's a few hundred ms is enough
+  // for that to read as a visible flash/blink rather than a live update,
+  // and it also reset scroll position on every tick. A poll refresh now
+  // fetches fresh data and re-renders the real content directly, with
+  // nothing torn down in between.
+  if (!isPoll) {
+    host.innerHTML = `<div class="grid g4"><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div><div class="skel" style="height:104px"></div></div>`;
+  }
   const d = await fetch(`${API}/api/documents/${id}`).then((r) => r.json());
   S.currentDoc = d;
 
@@ -334,7 +367,10 @@ async function renderDocument(id) {
 
   const factIds = new Set(facts.map((f) => f.id));
   const rels = S.rels.filter((r) => factIds.has(r.fact_id_a) || factIds.has(r.fact_id_b));
-  const relByType = { corroborates: 0, contradicts: 0, reconciled: 0 };
+  const relByType = {
+    corroborates: 0, contradicts: 0, reconciled: 0, uncertain: 0,
+    related_but_not_comparable: 0, insufficient_context: 0,
+  };
   rels.forEach((r) => { relByType[r.relation_type] = (relByType[r.relation_type] || 0) + 1; });
   const crossDoc = rels.filter((r) => r.fact_a.document_id !== r.fact_b.document_id).length;
 
@@ -397,10 +433,14 @@ async function renderDocument(id) {
             { label: "Corroborates", value: relByType.corroborates || 0, color: C.corroborates },
             { label: "Contradicts", value: relByType.contradicts || 0, color: C.contradicts },
             { label: "Reconciled", value: relByType.reconciled || 0, color: C.reconciled },
+            { label: "Uncertain", value: relByType.uncertain || 0, color: C.uncertain },
+            { label: "Not comparable", value: relByType.related_but_not_comparable || 0, color: C.related_but_not_comparable },
+            { label: "Insufficient context", value: relByType.insufficient_context || 0, color: C.insufficient_context },
           ], 148)}
           <div class="legend" style="flex:1">
-            ${["corroborates", "contradicts", "reconciled"].map((k) => `<div class="lg">
-              <span class="lg-dot" style="background:${C[k]}"></span><span class="lg-name">${k[0].toUpperCase() + k.slice(1)}</span>
+            ${["corroborates", "contradicts", "reconciled", "uncertain", "related_but_not_comparable", "insufficient_context"]
+              .filter((k) => relByType[k] > 0).map((k) => `<div class="lg">
+              <span class="lg-dot" style="background:${C[k]}"></span><span class="lg-name">${REL_LABEL[k]}</span>
               <span class="lg-val num">${relByType[k] || 0}</span></div>`).join("")}
           </div>
         </div>
@@ -448,17 +488,23 @@ async function renderDocument(id) {
       <div class="card-b">${facts.length ? facts.slice(0, 60).map(factCard).join("") + (facts.length > 60 ? `<div class="small" style="text-align:center;padding-top:8px">Showing 60 of ${facts.length} — see the Facts tab for all</div>` : "") : empty("No facts were extracted from this document.")}</div>
     </div>`;
 
-  animateIn(host);
+  animateIn(host, isPoll);
 
   clearTimeout(docPoll);
   if (d.status === "pending" || d.status === "processing") {
-    docPoll = setTimeout(() => { if (S.currentDoc && S.currentDoc.id === d.id) renderDocument(id); }, 2000);
+    docPoll = setTimeout(() => { if (S.currentDoc && S.currentDoc.id === d.id) renderDocument(id, true); }, 2000);
   }
 }
 
 // ---------------- knowledge graph ----------------
 
-let G = { nodes: [], links: [], t: { x: 0, y: 0, k: 1 }, raf: null, filters: new Set(["corroborates", "contradicts", "reconciled"]) };
+let G = {
+  nodes: [], links: [], t: { x: 0, y: 0, k: 1 }, raf: null,
+  filters: new Set([
+    "corroborates", "contradicts", "reconciled", "uncertain",
+    "related_but_not_comparable", "insufficient_context",
+  ]),
+};
 const SIM = { charge: -420, cutoff: 420, dist: 68, k: 0.05, center: 0.013, damp: 0.87 };
 
 function graphData() {
@@ -529,10 +575,14 @@ function renderGraph() {
 
   svg.innerHTML = `<g id="gr"><g id="gl" stroke-linecap="round"></g><g id="gn"></g></g>`;
   const root = svg.querySelector("#gr"), gl = svg.querySelector("#gl"), gn = svg.querySelector("#gn");
-  const ST = { corroborates: { w: 1.2, o: .26 }, contradicts: { w: 2.4, o: .85 }, reconciled: { w: 2.2, o: .8 } };
+  const ST = {
+    corroborates: { w: 1.2, o: .26 }, contradicts: { w: 2.4, o: .85 }, reconciled: { w: 2.2, o: .8 },
+    uncertain: { w: 1, o: .2 }, related_but_not_comparable: { w: 1, o: .2 }, insufficient_context: { w: 1, o: .2 },
+  };
+  const DEFAULT_ST = { w: 1, o: .2 };
 
   const le = links.map((l) => {
-    const s = ST[l.type], e = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    const s = ST[l.type] || DEFAULT_ST, e = document.createElementNS("http://www.w3.org/2000/svg", "line");
     e.setAttribute("stroke", C[l.type]); e.setAttribute("stroke-width", s.w); e.setAttribute("stroke-opacity", s.o);
     gl.appendChild(e); return e;
   });
@@ -563,7 +613,7 @@ function renderGraph() {
     });
     g.addEventListener("mouseleave", () => {
       c.setAttribute("stroke", "#fff");
-      le.forEach((x, li) => { const s = ST[links[li].type]; x.setAttribute("stroke-opacity", s.o); x.setAttribute("stroke-width", s.w); });
+      le.forEach((x, li) => { const s = ST[links[li].type] || DEFAULT_ST; x.setAttribute("stroke-opacity", s.o); x.setAttribute("stroke-width", s.w); });
     });
     gn.appendChild(g); return g;
   });
@@ -628,7 +678,17 @@ $("graphDocFilter").addEventListener("change", renderGraph);
 
 // ---------------- relationships ----------------
 
-const RI = { corroborates: I.check, contradicts: I.x, reconciled: I.link, uncertain: I.alert };
+const RI = {
+  corroborates: I.check, contradicts: I.x, reconciled: I.link, uncertain: I.alert,
+  related_but_not_comparable: I.scale, insufficient_context: I.help,
+};
+// Human-readable labels -- relation_type values are snake_case identifiers,
+// not display text.
+const REL_LABEL = {
+  corroborates: "Corroborates", contradicts: "Contradicts", reconciled: "Reconciled",
+  uncertain: "Uncertain", related_but_not_comparable: "Not comparable",
+  insufficient_context: "Insufficient context",
+};
 
 // Renders the SAME deterministic comparison the model itself was given
 // (app/normalize.py, recomputed server-side in GET /api/relationships) --
@@ -693,10 +753,16 @@ function relCard(r) {
     </div>` : ""}
     <div class="quote ${f.evidence_status === "fact_validated" ? "" : "bad"}">"${esc(f.quote.slice(0, 190))}${f.quote.length > 190 ? "…" : ""}"</div>
     <div class="gstat">${evidenceBadge(f)}</div></div>`;
+  const sourceNote = {
+    deterministic_confirmed: "code confirmed the model's answer",
+    deterministic_override: "code overrode the model's answer",
+    llm_unchecked: "no deterministic check applied -- the model's own reading",
+  }[r.decision_source];
   return `<div class="rcard rise">
     <div class="rcard-h">
-      <span class="badge b-${r.relation_type}"><span style="display:flex">${RI[r.relation_type] || ""}</span>${r.relation_type}</span>
+      <span class="badge b-${r.relation_type}"><span style="display:flex">${RI[r.relation_type] || ""}</span>${REL_LABEL[r.relation_type] || r.relation_type}</span>
       ${r.fact_a.document_id !== r.fact_b.document_id ? `<span class="badge b-brand">cross-document</span>` : ""}
+      ${sourceNote ? `<span class="small" title="${esc(sourceNote)}">${sourceNote}</span>` : ""}
       <span class="small num" style="margin-left:auto">similarity ${Number(r.similarity_score).toFixed(2)}${r.confidence != null ? ` · confidence ${Number(r.confidence).toFixed(2)}` : ""}</span>
     </div>
     <div class="rcard-b">
@@ -704,6 +770,14 @@ function relCard(r) {
         <div class="rconn ${r.relation_type}"><div class="ln"></div><div class="ic">${RI[r.relation_type] || ""}</div><div class="ln"></div></div>
         ${box(r.fact_b)}</div>
       ${comparisonStrip(r)}
+      ${r.disagreement ? `<div class="cmp-strip cmp-warn">
+        ${I.zap}
+        <div>
+          <div class="cmp-title">The system overrode its own model here</div>
+          <div class="cmp-sub">The model proposed <b>${esc(REL_LABEL[r.llm_proposal] || r.llm_proposal)}</b>, but a
+            deterministic check found otherwise: ${esc(r.disagreement_reason || "")}</div>
+        </div>
+      </div>` : ""}
       <div class="why"><b>Reasoning:</b> ${esc(r.explanation)}</div>
       ${r.reconciliation_context ? `<div class="rctx">${I.link}<span><b>Reconciled by:</b> ${esc(r.reconciliation_context)}</span></div>` : ""}
       ${r.candidate_reason ? `<div class="why prov"><b>Retrieved by:</b> ${esc(r.candidate_reason)}</div>` : ""}
@@ -821,7 +895,8 @@ async function renderDocTable() {
 // ---------------- issues ----------------
 
 function renderIssues() {
-  fetch(`${API}/api/issues`).then((r) => r.json()).then((issues) => {
+  const doc = $("issueDoc") ? $("issueDoc").value : "";
+  fetch(`${API}/api/issues${doc ? `?document_id=${doc}` : ""}`).then((r) => r.json()).then((issues) => {
     $("issueBody").innerHTML = issues.length ? issues.map((i) => `<tr>
       <td class="r small">${i.document_id ?? "—"}</td><td class="r small">${i.page_number ?? "—"}</td>
       <td><span class="badge b-failed"><span style="display:flex">${I.alert}</span>${esc(i.issue_type)}</span></td>
@@ -829,6 +904,7 @@ function renderIssues() {
       : `<tr><td colspan="4">${empty("No issues logged yet.")}</td></tr>`;
   });
 }
+if ($("issueDoc")) $("issueDoc").addEventListener("change", renderIssues);
 
 // ---------------- upload ----------------
 
@@ -893,6 +969,7 @@ function cohViolation(v) {
     </div>`).join("");
   return `<div class="ccard rise">
     <div class="ccard-h">${I.alert}<b>Impossible triangle</b>
+      <span class="ctag" style="${v.is_strict_proof ? "" : "background:var(--surface-3);color:var(--ink-2)"}">${v.is_strict_proof ? "strict proof" : "strong evidence, model-judged equality"}</span>
       <span class="small" style="margin-left:auto">facts ${v.facts.map((f) => esc(f.id)).join(" · ")}</span>
     </div>
     <div class="ccard-b">
@@ -922,9 +999,10 @@ async function renderCoherence() {
   head.innerHTML = `<div class="empty">${I.loader}<span>Checking the graph…</span></div>`;
   body.innerHTML = "";
 
+  const doc = $("cohDoc") ? $("cohDoc").value : "";
   let d;
   try {
-    d = await (await fetch(`${API}/api/coherence?limit=25`)).json();
+    d = await (await fetch(`${API}/api/coherence?limit=25${doc ? `&document_id=${doc}` : ""}`)).json();
   } catch (e) {
     head.innerHTML = empty("Could not run the logic check.");
     return;
@@ -937,8 +1015,11 @@ async function renderCoherence() {
     <div class="note">
       Every relationship is judged <b>pairwise, in isolation</b>. But equality is transitive: if
       A corroborates B and B corroborates C, then A <b>cannot</b> contradict C. Triangles like that
-      prove at least one judgment is wrong — with no ground truth, no reviewer, and no extra model
-      call. The same transitivity implies edges that candidate retrieval never shortlisted.
+      mean at least one judgment is wrong — with no ground truth, no reviewer, and no extra model
+      call. That's a strict proof when every "corroborates" edge involved is backed by a
+      deterministic numeric check, and strong (not literally mathematical) evidence when one rests
+      only on the model's own qualitative reading — marked per triangle below. The same transitivity
+      implies edges that candidate retrieval never shortlisted.
     </div>
     <div class="grid g4 mb24">
       ${statTile("Closed triangles", d.triangles_checked, "checked for logical consistency", I.layers, "")}
@@ -951,7 +1032,7 @@ async function renderCoherence() {
   animateIn(head);
 
   body.innerHTML = `
-    <h3 class="sec">Proven inconsistencies</h3>
+    <h3 class="sec">Logically inconsistent triangles</h3>
     ${d.violations.length ? d.violations.map(cohViolation).join("") : empty("No logically impossible triangles. The graph is self-consistent.")}
     <h3 class="sec">Relationships deduced by transitivity</h3>
     <div class="note small">These were never sent to the model. They follow from edges the graph
@@ -993,6 +1074,8 @@ function priorityFactRow(f) {
   </div>`;
 }
 
+if ($("cohDoc")) $("cohDoc").addEventListener("change", renderCoherence);
+
 function priorityRelRow(r) {
   return `<div class="prio-item rise">
     <div class="prio-item-h">${priorityBadge(r.priority_level)}<span class="small num">score ${r.priority_score}</span></div>
@@ -1007,9 +1090,10 @@ async function renderPriority() {
   head.innerHTML = `<div class="empty">${I.loader}<span>Ranking…</span></div>`;
   body.innerHTML = "";
 
+  const doc = $("prioDoc") ? $("prioDoc").value : "";
   let d;
   try {
-    d = await (await fetch(`${API}/api/priority?limit=200`)).json();
+    d = await (await fetch(`${API}/api/priority?limit=200${doc ? `&document_id=${doc}` : ""}`)).json();
   } catch (e) {
     head.innerHTML = empty("Could not load priority ranking.");
     return;
@@ -1056,6 +1140,11 @@ function paintPriorityList() {
 ["prioType", "prioLevel"].forEach((id) => {
   document.addEventListener("change", (ev) => { if (ev.target && ev.target.id === id) paintPriorityList(); });
 });
+// Unlike type/level (a client-side re-filter of data already fetched),
+// the document filter changes what's even in scope on the server --
+// app/priority.py's ranking itself is scoped, not just the display -- so
+// this re-fetches rather than re-filtering in place.
+if ($("prioDoc")) $("prioDoc").addEventListener("change", renderPriority);
 
 // ---------------- timelines ----------------
 // A `corroborates`/`reconciled` relationship already claims two facts
@@ -1113,9 +1202,10 @@ async function renderTimelines() {
   head.innerHTML = `<div class="empty">${I.loader}<span>Finding trends…</span></div>`;
   body.innerHTML = "";
 
+  const doc = $("tlDoc") ? $("tlDoc").value : "";
   let d;
   try {
-    d = await (await fetch(`${API}/api/timelines`)).json();
+    d = await (await fetch(`${API}/api/timelines${doc ? `?document_id=${doc}` : ""}`)).json();
   } catch (e) {
     head.innerHTML = empty("Could not load timelines.");
     return;
@@ -1140,3 +1230,4 @@ async function renderTimelines() {
     : empty("No metric appears at two or more distinct, comparable periods yet.");
   animateIn(body);
 }
+if ($("tlDoc")) $("tlDoc").addEventListener("change", renderTimelines);

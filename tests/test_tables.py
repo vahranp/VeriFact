@@ -11,6 +11,7 @@ happen to contain.
 import fitz
 
 from app.tables import (
+    PLAIN_NOT_TABULAR, PLAIN_RECONSTRUCTION_REJECTED, RECONSTRUCTED,
     Row, _split_into_cells, find_gutters, layout_aware_text, looks_tabular,
     reconstruct_rows,
 )
@@ -109,8 +110,8 @@ class TestProseIsLeftAlone:
     def test_prose_text_is_returned_unchanged(self):
         doc, page = _prose_page()
         try:
-            text, used = layout_aware_text(page)
-            assert used is False
+            text, table_context = layout_aware_text(page)
+            assert table_context == PLAIN_NOT_TABULAR
             assert text == page.get_text("text").strip()
             assert "|" not in text
         finally:
@@ -119,8 +120,8 @@ class TestProseIsLeftAlone:
     def test_a_table_page_does_use_layout(self):
         doc, page = _table_page()
         try:
-            _text, used = layout_aware_text(page)
-            assert used is True
+            _text, table_context = layout_aware_text(page)
+            assert table_context == RECONSTRUCTED
         finally:
             doc.close()
 
@@ -130,7 +131,7 @@ class TestProseIsLeftAlone:
         page = doc.load_page(0)
         try:
             assert reconstruct_rows(page) == []
-            assert layout_aware_text(page) == ("", False)
+            assert layout_aware_text(page) == ("", PLAIN_NOT_TABULAR)
         finally:
             doc.close()
 
@@ -199,6 +200,43 @@ class TestContentPreservation:
             text, _ = layout_aware_text(page)
             for token in ("FY2023", "FY2024", "FY2025", "500", "1100", "Female"):
                 assert token in text
+        finally:
+            doc.close()
+
+
+class TestTableContextFlagsTheRiskyFallback:
+    """table_context (see app/db.py's facts.table_context, app/pdf_extract.py,
+    app/fact_extraction.py) exists specifically to distinguish "this page
+    was never tabular" from "this page WAS tabular but reconstruction was
+    rejected" -- the second is the risky one: the model sees the exact
+    flattened-grid text that originally caused row-label extraction
+    errors, with no signal that anything is different about this page."""
+
+    def test_a_content_losing_reconstruction_is_flagged_rejected_not_silently_plain(self, monkeypatch):
+        import app.tables as tables_module
+        doc, page = _table_page()
+        try:
+            monkeypatch.setattr(tables_module, "render_rows", lambda rows: "x")
+            text, table_context = layout_aware_text(page)
+            assert table_context == PLAIN_RECONSTRUCTION_REJECTED
+            assert text == page.get_text("text").strip()
+        finally:
+            doc.close()
+
+    def test_an_exception_during_reconstruction_is_flagged_rejected(self, monkeypatch):
+        """The exception handler can't know whether the page was tabular
+        (the exception happens before looks_tabular runs) -- flagged as
+        the risky case rather than assumed safe, the more conservative
+        of the two."""
+        import app.tables as tables_module
+        doc, page = _table_page()
+        try:
+            def boom(_page):
+                raise RuntimeError("simulated layout failure")
+            monkeypatch.setattr(tables_module, "reconstruct_rows", boom)
+            text, table_context = layout_aware_text(page)
+            assert table_context == PLAIN_RECONSTRUCTION_REJECTED
+            assert text == page.get_text("text").strip()
         finally:
             doc.close()
 

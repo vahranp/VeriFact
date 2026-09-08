@@ -231,8 +231,39 @@ def render_rows(rows: list[Row]) -> str:
     return "\n".join(r.render() for r in rows)
 
 
-def layout_aware_text(page) -> tuple[str, bool]:
-    """Returns (text, used_layout).
+# table_context values -- see layout_aware_text. Exported so callers that
+# need to reason about extraction risk (app/pdf_extract.py, app/
+# fact_extraction.py) can compare against them rather than magic strings.
+RECONSTRUCTED = "reconstructed"
+PLAIN_NOT_TABULAR = "plain_not_tabular"
+PLAIN_RECONSTRUCTION_REJECTED = "plain_reconstruction_rejected"
+
+
+def layout_aware_text(page) -> tuple[str, str]:
+    """Returns (text, table_context).
+
+    table_context is one of:
+      RECONSTRUCTED                 -- the page looked tabular and row/cell
+                                        reconstruction succeeded; `text` is
+                                        the reconstructed, pipe-delimited
+                                        form.
+      PLAIN_NOT_TABULAR             -- the page didn't look tabular at all;
+                                        `text` is plain reading-order text,
+                                        and there was no flattening risk to
+                                        begin with.
+      PLAIN_RECONSTRUCTION_REJECTED -- the page DID look tabular, but
+                                        reconstruction was rejected (an
+                                        exception, or it lost too much
+                                        content) and fell back to plain
+                                        text -- the SAME flattened-grid text
+                                        that originally caused row-label
+                                        extraction errors (see app/
+                                        evidence.py), now with no structural
+                                        help. This is the case worth a
+                                        caller's attention: nothing about
+                                        the fallback text itself signals the
+                                        elevated risk unless table_context
+                                        is checked.
 
     Falls back to the plain reading-order text whenever the page doesn't
     look tabular or reconstruction produced nothing usable, so a page that
@@ -242,17 +273,17 @@ def layout_aware_text(page) -> tuple[str, bool]:
     try:
         rows = reconstruct_rows(page)
     except Exception:  # noqa: BLE001 - never let layout analysis break ingestion
-        return plain, False
+        return plain, PLAIN_RECONSTRUCTION_REJECTED
 
     if not rows or not looks_tabular(rows):
-        return plain, False
+        return plain, PLAIN_NOT_TABULAR
 
     rendered = render_rows(rows).strip()
     # A reconstruction that lost a meaningful amount of text is a bug in
     # the clustering, not an improvement -- prefer the known-good text.
     if len(rendered) < len(plain) * 0.6:
-        return plain, False
-    return rendered, True
+        return plain, PLAIN_RECONSTRUCTION_REJECTED
+    return rendered, RECONSTRUCTED
 
 
 def page_is_tabular(pdf_path: str, page_number: int) -> bool:

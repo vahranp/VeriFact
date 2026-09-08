@@ -12,11 +12,12 @@ from app.timeline import build_timelines
 
 
 def _fact(fact_id, value, unit="INR million", period="FY24", scope=None,
-          subject="Delhivery", attribute="revenue"):
+          subject="Delhivery", attribute="revenue", evidence_status=None):
     return {
         "id": fact_id, "document_id": 1, "value_numeric": value, "unit": unit,
         "time_period": period, "scope": scope, "subject": subject,
         "attribute": attribute, "value": value, "statement": f"{attribute} was {value}",
+        "evidence_status": evidence_status,
     }
 
 
@@ -31,6 +32,16 @@ class TestBasicChaining:
         timelines = build_timelines(facts, rels)
         assert len(timelines) == 1
         assert [p.original_value for p in timelines[0].points] == [100, 120]
+
+    def test_evidence_status_is_carried_onto_each_point(self):
+        """A trend must not display an unverified point with the same
+        implied confidence as a validated one -- the status has to survive
+        onto the point for a caller (the API/UI) to show the difference."""
+        facts = [_fact(1, 100, period="FY23", evidence_status="fact_validated"),
+                 _fact(2, 120, period="FY24", evidence_status="quote_grounded")]
+        rels = [_rel(1, 2)]
+        points = build_timelines(facts, rels)[0].points
+        assert [p.evidence_status for p in points] == ["fact_validated", "quote_grounded"]
 
     def test_points_are_sorted_chronologically_regardless_of_input_order(self):
         facts = [_fact(1, 120, period="FY24"), _fact(2, 100, period="FY22"), _fact(3, 110, period="FY23")]

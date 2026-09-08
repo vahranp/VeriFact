@@ -6,12 +6,16 @@ decides whether to trust what the model returned.
 """
 import pytest
 
+from app import fact_extraction
 from app.fact_extraction import (
     _clean,
     _find_quote_offset,
     _numeric_fallback,
     _recover_non_list_shape,
+    extract_facts_from_chunk,
 )
+from app.pdf_extract import Chunk
+from app.tables import PLAIN_NOT_TABULAR, PLAIN_RECONSTRUCTION_REJECTED, RECONSTRUCTED
 
 
 class TestFindQuoteOffset:
@@ -74,6 +78,21 @@ class TestNumericFallback:
     def test_non_numeric_returns_none(self, value):
         assert _numeric_fallback(value) is None
 
+    @pytest.mark.parametrize("value", ["FY2024", "FY 2024", "Q1 2025", "fiscal 2024"])
+    def test_a_period_label_in_the_value_field_is_not_read_as_a_number(self, value):
+        """A model occasionally puts a period label where a value belongs.
+        Falling back to the digits in "FY2024" would fabricate
+        value_numeric=2024 for a fact that isn't stating the number 2024 at
+        all -- worse than leaving it null."""
+        assert _numeric_fallback(value) is None
+
+    def test_a_bare_number_that_looks_like_a_year_is_still_read(self):
+        """The period-label guard is scoped to an explicit fiscal/quarter
+        prefix, not to anything that could theoretically be a year --
+        otherwise a genuine count of 2024 (e.g. "2024 units") would be
+        wrongly suppressed too."""
+        assert _numeric_fallback("2024") == 2024.0
+
 
 class TestRecoverNonListShape:
     """Local models sometimes return a single object, or wrap the array
@@ -97,6 +116,77 @@ class TestRecoverNonListShape:
 
     def test_non_dict_input_returns_none(self):
         assert _recover_non_list_shape("a string") == (None, None)
+
+
+def _page_text(marker: str) -> str:
+    # Each test needs genuinely distinct chunk text: extract_facts_from_chunk's
+    # cache key is hash(model, prompt, chunk.text, chunk.page_context) --
+    # NOT table_context or page_number -- so two tests sharing identical
+    # text would have the second silently served the first's cached
+    # result (including its table_context-derived issue/evidence_detail)
+    # regardless of what its own mock intended to return.
+    return f"Revenue from operations was 8,142 crore for the year ({marker})"
+
+
+def _mock_extraction_llm(monkeypatch, quote, facts=None):
+    facts = facts if facts is not None else [{
+        "subject": "Company", "attribute": "revenue", "value": "8,142 crore",
+        "value_numeric": 8142.0, "unit": "INR Crore", "time_period": "FY24",
+        "statement": "Company revenue from operations was 8,142 crore in FY24.",
+        "quote": quote, "confidence": 0.9,
+    }]
+    monkeypatch.setattr(fact_extraction, "chat_json", lambda *a, **k: facts)
+
+
+class TestTableContextIsStampedOntoFacts:
+    """table_context (see app/tables.py) has to survive from the chunk it
+    came from onto every fact extracted from it -- that's what lets a
+    reviewer (or a future automated check) tell a fact grounded in
+    confidently-reconstructed table text from one grounded in a page that
+    looked tabular but whose reconstruction was rejected."""
+
+    def test_a_reconstructed_chunks_facts_carry_that_context(self, monkeypatch):
+        text = _page_text("reconstructed")
+        _mock_extraction_llm(monkeypatch, quote=text)
+        chunk = Chunk(page_number=1, text=text, table_context=RECONSTRUCTED)
+        facts, _issues, _cache_hit = extract_facts_from_chunk(chunk)
+        assert facts[0]["table_context"] == RECONSTRUCTED
+
+    def test_a_plain_prose_chunks_facts_carry_that_context(self, monkeypatch):
+        text = _page_text("plain")
+        _mock_extraction_llm(monkeypatch, quote=text)
+        chunk = Chunk(page_number=1, text=text, table_context=PLAIN_NOT_TABULAR)
+        facts, _issues, _cache_hit = extract_facts_from_chunk(chunk)
+        assert facts[0]["table_context"] == PLAIN_NOT_TABULAR
+
+    def test_a_rejected_reconstruction_flags_an_issue_and_the_facts_evidence_detail(self, monkeypatch):
+        text = _page_text("rejected")
+        _mock_extraction_llm(monkeypatch, quote=text)
+        chunk = Chunk(page_number=7, text=text, table_context=PLAIN_RECONSTRUCTION_REJECTED)
+        facts, issues, _cache_hit = extract_facts_from_chunk(chunk)
+
+        assert facts[0]["table_context"] == PLAIN_RECONSTRUCTION_REJECTED
+        assert "reconstruction was rejected" in facts[0]["evidence_detail"]
+        assert any(i["issue_type"] == "table_alignment_uncertain" for i in issues)
+
+    def test_a_confident_reconstruction_raises_no_such_issue(self, monkeypatch):
+        text = _page_text("confident")
+        _mock_extraction_llm(monkeypatch, quote=text)
+        chunk = Chunk(page_number=1, text=text, table_context=RECONSTRUCTED)
+        _facts, issues, _cache_hit = extract_facts_from_chunk(chunk)
+        assert not any(i["issue_type"] == "table_alignment_uncertain" for i in issues)
+
+    def test_the_issue_is_recorded_once_per_chunk_not_once_per_fact(self, monkeypatch):
+        text = _page_text("many facts")
+        many_facts = [{
+            "subject": "Company", "attribute": f"metric {i}", "value": "8,142",
+            "value_numeric": 8142.0, "statement": f"metric {i} was 8,142",
+            "quote": text, "confidence": 0.9,
+        } for i in range(3)]
+        _mock_extraction_llm(monkeypatch, quote=text, facts=many_facts)
+        chunk = Chunk(page_number=1, text=text, table_context=PLAIN_RECONSTRUCTION_REJECTED)
+        _facts, issues, _cache_hit = extract_facts_from_chunk(chunk)
+        assert sum(1 for i in issues if i["issue_type"] == "table_alignment_uncertain") == 1
 
 
 class TestClean:

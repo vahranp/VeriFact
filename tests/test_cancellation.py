@@ -212,7 +212,7 @@ class TestExtractionStageCancellation:
             monkeypatch.setattr(pipeline, "page_count", lambda _path: 3)
             monkeypatch.setattr(pipeline, "extract_chunks", lambda _path: chunks)
 
-            def fake_extract(chunk, _document_name):
+            def fake_extract(chunk):
                 # Every chunk requests a stop as its first action --
                 # guarantees is_cancel_requested reads True as soon as any
                 # chunk completes, without depending on which one wins the
@@ -274,7 +274,7 @@ class TestExtractionStageCancellation:
             monkeypatch.setattr(pipeline, "extract_chunks", lambda _path: chunks)
             monkeypatch.setattr(
                 pipeline, "extract_facts_from_chunk",
-                lambda chunk, name: ([_fact_dict(1)], [], False),
+                lambda chunk: ([_fact_dict(1)], [], False),
             )
             monkeypatch.setattr(pipeline, "embed", lambda texts: [_vec() for _ in texts])
 

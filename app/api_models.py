@@ -65,7 +65,18 @@ class FactOut(_Permissive):
     unit: Optional[str] = None
     time_period: Optional[str] = None
     scope: Optional[str] = None
-    confidence: Optional[float] = None
+    confidence: Optional[float] = Field(
+        default=None,
+        description="The model's own stated confidence -- not a calibrated probability. "
+                    "See a relationship's decision_source for how much a JUDGMENT actually rests on it.",
+    )
+    table_context: Optional[Literal["reconstructed", "plain_not_tabular", "plain_reconstruction_rejected"]] = Field(
+        default=None,
+        description="Whether this fact's page was layout-reconstructed as a table, was plain "
+                    "prose, or looked tabular but had its reconstruction rejected -- the risky "
+                    "case, where the model saw the same flattened-grid text known to cause "
+                    "row/column misattribution. See app/tables.py.",
+    )
 
 
 class NormalizedComparisonOut(_Permissive):
@@ -82,17 +93,58 @@ class NormalizedComparisonOut(_Permissive):
     value_b: Optional[float] = None
 
 
+RELATION_TYPES = Literal[
+    "corroborates", "contradicts", "reconciled", "uncertain",
+    "related_but_not_comparable", "insufficient_context",
+]
+
+
 class RelationshipOut(_Permissive):
     id: int
     fact_id_a: int
     fact_id_b: int
-    relation_type: Literal["corroborates", "contradicts", "reconciled", "uncertain"]
+    relation_type: RELATION_TYPES = Field(
+        description="The FINAL, adjudicated relation -- see decision_source for whether this is "
+                    "the model's own proposal or a deterministic override of it."
+    )
     explanation: Optional[str] = None
     reconciliation_context: Optional[str] = None
-    confidence: Optional[float] = None
+    confidence: Optional[float] = Field(
+        default=None,
+        description="1.0 for any deterministically confirmed/overridden decision (see "
+                    "decision_source) -- a computed fact, not an estimate. Only reflects the "
+                    "model's own stated confidence when decision_source is 'llm_unchecked'.",
+    )
     similarity_score: Optional[float] = None
     candidate_reason: Optional[str] = Field(
         default=None, description="Which retrieval signal promoted this pair for judgment."
+    )
+    decision_source: Optional[Literal["deterministic_confirmed", "deterministic_override", "llm_unchecked"]] = Field(
+        default=None,
+        description="Whether a deterministic check applied at all, and whether it agreed with "
+                    "('_confirmed') or overrode ('_override') the model's own step-2 proposal. "
+                    "'llm_unchecked' means no deterministic signal was conclusive -- typically a "
+                    "genuinely qualitative pair -- so the model's own reading stands. Null for "
+                    "relationships stored before app/adjudication.py existed. See app/adjudication.py.",
+    )
+    llm_proposal: Optional[RELATION_TYPES] = Field(
+        default=None,
+        description="What the model itself proposed in step 2, preserved even when overridden -- "
+                    "disagreement between this and relation_type is never hidden.",
+    )
+    disagreement: Optional[bool] = Field(
+        default=None,
+        description="True when the deterministic adjudicator overrode the model's own proposal. "
+                    "This is a signature signal: the system catching its own LLM being wrong.",
+    )
+    disagreement_reason: Optional[str] = Field(
+        default=None, description="Why the override happened, when disagreement is true.",
+    )
+    adjudication_checks: Optional[dict] = Field(
+        default=None,
+        description="The full deterministic trace behind the decision: the numeric comparison, "
+                    "period/scope verdicts and their dimension (scope vs. basis), evidence "
+                    "caveats, and step 1's stated slices. See app/adjudication.py::Adjudication.checks.",
     )
     fact_a: Optional[FactOut] = None
     fact_b: Optional[FactOut] = None

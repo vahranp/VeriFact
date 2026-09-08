@@ -56,6 +56,12 @@ class TimelinePoint:
     original_unit: Optional[str]
     scope: Optional[str]
     statement: str
+    # Carried through so a trend isn't shown with uniform confidence when
+    # one of its points rests on an unverified value -- a pct_change
+    # computed against an "ungrounded" or "quote_grounded" (not
+    # fact_validated) point is asserting more certainty than that point
+    # actually has.
+    evidence_status: Optional[str] = None
 
     def pct_change_from(self, prev: "TimelinePoint") -> Optional[float]:
         if prev.value == 0:
@@ -221,6 +227,7 @@ def build_timelines(facts: list[dict], relationships: list[dict],
                 period_label=label, sort_key=sort_key, value=norm.value,
                 original_value=fact.get("value"), original_unit=fact.get("unit"),
                 scope=fact.get("scope"), statement=fact.get("statement", ""),
+                evidence_status=fact.get("evidence_status"),
             ))
 
         if len(points) < min_points:

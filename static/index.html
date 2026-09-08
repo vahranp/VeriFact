@@ -126,6 +126,9 @@
             <button class="btn on" data-gf="corroborates">Corroborates</button>
             <button class="btn on" data-gf="contradicts">Contradicts</button>
             <button class="btn on" data-gf="reconciled">Reconciled</button>
+            <button class="btn on" data-gf="uncertain">Uncertain</button>
+            <button class="btn on" data-gf="related_but_not_comparable">Not comparable</button>
+            <button class="btn on" data-gf="insufficient_context">Insufficient context</button>
             <select id="graphDocFilter" style="min-width:190px"></select>
             <button class="btn" id="graphReset">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -138,6 +141,9 @@
             <div class="r"><span class="ln" style="background:#059669"></span> Corroborates</div>
             <div class="r"><span class="ln" style="background:#dc2626"></span> Contradicts</div>
             <div class="r"><span class="ln" style="background:#d97706"></span> Reconciled</div>
+            <div class="r"><span class="ln" style="background:#64748b"></span> Uncertain</div>
+            <div class="r"><span class="ln" style="background:#7c3aed"></span> Not comparable</div>
+            <div class="r"><span class="ln" style="background:#0891b2"></span> Insufficient context</div>
             <div class="t" style="margin-top:12px">Node</div>
             <div class="r small">Size = connections · colour = document</div>
           </div>
@@ -154,6 +160,9 @@
             <option value="corroborates">Corroborates</option>
             <option value="contradicts">Contradicts</option>
             <option value="reconciled">Reconciled (context)</option>
+            <option value="uncertain">Uncertain</option>
+            <option value="related_but_not_comparable">Related, not comparable</option>
+            <option value="insufficient_context">Insufficient context</option>
           </select>
           <select id="relDoc"></select>
           <span class="sp"></span>
@@ -185,12 +194,16 @@
             <option value="medium">Medium</option>
             <option value="low">Low</option>
           </select>
+          <select id="prioDoc"></select>
         </div>
         <div id="prioBody"></div>
       </section>
 
       <!-- timelines -->
       <section id="view-timelines" class="view">
+        <div class="toolbar">
+          <select id="tlDoc"></select>
+        </div>
         <div id="tlHead"></div>
         <div id="tlBody"></div>
       </section>
@@ -207,11 +220,17 @@
 
       <!-- issues -->
       <section id="view-coherence" class="view">
+        <div class="toolbar">
+          <select id="cohDoc"></select>
+        </div>
         <div id="cohHead"></div>
         <div id="cohBody"></div>
       </section>
 
       <section id="view-issues" class="view">
+        <div class="toolbar">
+          <select id="issueDoc"></select>
+        </div>
         <div class="card card-b mb16 small">
           Things the pipeline flagged as uncertain or failed — a quote that couldn't be found verbatim, a response that
           failed to parse, a comparison call that errored. Surfaced deliberately rather than hidden.

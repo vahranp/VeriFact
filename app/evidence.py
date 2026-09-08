@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.normalize import normalize_unit
+from app.normalize import extract_number_tokens, normalize_unit
 
 # Verification outcomes, ordered weakest to strongest.
 UNGROUNDED = "ungrounded"        # the quote isn't in the source at all
@@ -75,49 +75,38 @@ class EvidenceCheck:
         return "quote found in source, but " + "; ".join(self.notes or ["it does not support the extracted fields"])
 
 
-def _digits(text) -> str:
-    """Digit-only projection, so 1,234.50 / 1234.5 / 1 234,50 all compare."""
-    return re.sub(r"[^0-9]", "", str(text or ""))
-
-
-def _number_forms(value_numeric: Optional[float], raw_value) -> set[str]:
-    """The digit strings a number could legitimately appear as in prose.
-
-    A value of 8142.0 may be written "8,142" or "8142" or "8142.00"; a
-    value parsed from "(452)" appears as "452". Comparing digit-only
-    projections sidesteps separators, currency symbols and sign
-    conventions without needing to model any of them.
-    """
-    forms: set[str] = set()
-    if raw_value is not None:
-        d = _digits(raw_value)
-        if d:
-            forms.add(d)
-    if value_numeric is not None:
-        forms.add(_digits(value_numeric))
-        # 8142.0 is written "8142", not "81420"
-        if float(value_numeric).is_integer():
-            forms.add(str(int(abs(value_numeric))))
-        else:
-            forms.add(_digits(f"{abs(value_numeric):.10g}"))
-        # Trailing zeros from float formatting shouldn't cause a miss.
-        forms.add(_digits(f"{abs(value_numeric):g}"))
-    return {f for f in forms if f}
-
-
 def _value_appears_in(quote: str, value_numeric: Optional[float], raw_value) -> Optional[bool]:
-    """Is the fact's number actually present in its quote?
+    """Is the fact's number actually present in its quote, as its OWN
+    numeric token -- not merely as a run of matching digits somewhere
+    inside a longer number.
+
+    An earlier version of this check projected both sides to digit-only
+    strings and did a substring test, which is a materially weaker check
+    than it looks: value=12 "matched" any quote containing "2024" and
+    "120" (their concatenated digits, "2024120", contain "12" as a
+    substring), and stripping the decimal point out of "12.5" left "125",
+    which is a substring of an unrelated "3125". Tokenizing the quote with
+    extract_number_tokens (the same locale-aware parser used everywhere
+    else numbers are read in this project) and comparing actual numeric
+    values closes both holes: 12 no longer "appears in" 120 or 2024, and
+    12.5 no longer "appears in" 3125.
 
     Returns None for facts with no number at all (a status or qualitative
     fact) -- those simply have nothing numeric to verify, which is not the
     same as failing verification.
     """
-    if value_numeric is None and not _digits(raw_value):
+    targets: list[float] = []
+    if value_numeric is not None:
+        targets.append(float(value_numeric))
+    if raw_value is not None:
+        targets.extend(extract_number_tokens(str(raw_value)))
+    if not targets:
         return None
-    quote_digits = _digits(quote)
-    if not quote_digits:
+
+    quote_tokens = extract_number_tokens(quote)
+    if not quote_tokens:
         return False
-    return any(form in quote_digits for form in _number_forms(value_numeric, raw_value))
+    return any(abs(t - q) < 1e-6 * max(1.0, abs(t)) for t in targets for q in quote_tokens)
 
 
 def _unit_appears_in(quote: str, unit: Optional[str]) -> Optional[bool]:

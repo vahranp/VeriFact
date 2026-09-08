@@ -97,16 +97,33 @@ instead of a fabricated percentage difference. The same applies to periods: `app
 
 ## 8. Why doesn't the LLM have final authority over numerical comparison?
 
-Because I measured what happens when it does, and because I have a concrete case where model
-confidence pointed at the wrong answer.
+It doesn't, and as of the hardening pass that's enforced in code, not just requested in a prompt.
 
-In a broken coherence triangle, the false `corroborates` edge came back at **confidence 1.0** while
-the correct `reconciled` edge sat at **0.8**. My first blame heuristic picked the least-confident
-edge — and therefore accused the right answer. Confidence was not just uninformative, it was
-actively inverted.
+The original architecture computed the comparison in `app/normalize.py`, handed it to the model as
+text ("these agree to 0.006%"), and asked the model to respect it. Nothing checked that it had.
+That's a real gap, not a hypothetical one: it's exactly how a prompt regression once turned a clean
+0.006%-agreement into a stored `contradicts` (see the "three things I got wrong" section below) —
+the model was *told* the values agreed and still got to override that into a contradiction, and
+nothing in the code would have stopped a worse version of the same failure from shipping.
 
-So arithmetic adjudicates. An edge claiming two facts corroborate while their normalized values
-differ is wrong regardless of how certain the model sounded. `app/normalize.py` has no opinion.
+`app/adjudication.py` closes it. The model's step-2 answer is now a *proposal*; a deterministic
+adjudicator re-applies the same value/period/scope logic and only accepts the proposal when it
+either agrees with what code independently concludes, or code has nothing conclusive to say. Where
+code IS conclusive, it wins even over a confidently-worded model explanation — values equal under
+confirmed-same context is `corroborates`, full stop, regardless of what the model proposed; values
+different under confirmed-same context is `contradicts`, even if the model invents a plausible-
+sounding reconciling story. Every relationship stores `decision_source` (did a check apply, did it
+agree with the model) and, on override, the model's original proposal and the disagreement reason
+— so the two opinions are always both visible, not just the one that won.
+
+I also have a second, independent reason not to trust model confidence specifically: in a broken
+coherence triangle, the false `corroborates` edge came back at **confidence 1.0** while the correct
+`reconciled` edge sat at **0.8**. My first blame heuristic picked the least-confident edge — and
+therefore accused the right answer. Confidence was not just uninformative, it was actively
+inverted. That's why a deterministically confirmed or overridden relationship is now stored with
+`confidence: 1.0` regardless of what the model said — the label is a computed fact at that point,
+not an estimate — and the model's own stated confidence survives only on `llm_unchecked`
+relationships, where it's genuinely the best signal available.
 
 ## 9. How does evidence grounding work?
 
@@ -171,8 +188,8 @@ pages are untouched.
 
 ## 12. How do you distinguish contradiction from contextual reconciliation?
 
-This is the crux of the assignment, and it's answered in three separated stages rather than one
-classification.
+This is the crux of the assignment, and it's answered in four separated stages rather than one
+classification — one more than before the hardening pass, and the new one is the load-bearing one.
 
 **Stage 1 — same metric?** The model names each fact's *slice* (segment, geography, or "whole")
 before giving a verdict. A part compared against its own total manufactures a false contradiction
@@ -180,15 +197,33 @@ out of an expected difference — the smaller figure is *supposed* to be smaller
 
 **Stage 2 — deterministic checks.** Values, period and scope are compared in code. Period returns
 same / different / **overlapping** / unknown; overlapping is its own answer because a quarter
-inside its year isn't expected to match and isn't a conflict.
+inside its year isn't expected to match and isn't a conflict. Scope now also reports WHICH axis
+differed (`scope` vs. `basis`), and only checks contrasts within one axis — a fix made during this
+pass after finding the old code compared every qualifier against every other regardless of axis,
+so "gross" and "actual" (orthogonal, not opposites) could be reported as a contrasting scope.
 
-**Stage 3 — the model judges, given those verdicts.** Different period or scope → the difference is
-expected, so `reconciled`, and it must name the reconciling context. Same period and scope →
-unexplained, so `contradicts`. Period UNKNOWN with differing values → `uncertain`, because guessing
-between the two would be asserting more than the evidence supports.
+**Stage 3 — the model proposes, given those verdicts.** Different period or scope → the difference
+is expected, so `reconciled`, and it must name the reconciling context. Same period and scope →
+unexplained, so `contradicts`. Period UNKNOWN with differing values → `uncertain`.
+
+**Stage 4 — deterministic adjudication (new).** Stage 3 used to be the final answer. Now
+`app/adjudication.py` checks it: where stages 1-2 are conclusive (values equal + context confirmed
+equal; values different + context confirmed equal; values different + context confirmed different;
+values different + context UNKNOWN), the deterministic verdict wins even over a different model
+proposal, and the two extra states below get produced deterministically rather than left to the
+model's discretion between "unrelated" and "uncertain":
+
+- `related_but_not_comparable` — both facts are numeric, but the units don't reduce to a common
+  base (e.g. a percentage against an absolute count). A structural fact, not a judgment call.
+- `insufficient_context` — values differ, but period or scope came back UNKNOWN. Previously
+  indistinguishable from a shaky semantic judgment; now its own label naming the actual reason.
 
 The measured impact of stage 1: a corpus-wide re-audit removed **142 false positives** (revenue
-segments being reported as contradicting each other) with **0 legitimate relabels**.
+segments being reported as contradicting each other) with **0 legitimate relabels**. The measured
+impact of stage 4 is qualitative rather than a single number (see FINAL_REVIEW.md for the specific
+before/after cases) — it doesn't change how often the pipeline reaches for `contradicts` vs.
+`reconciled`, it changes whether the model is actually held to the computed answer it was given, or
+merely asked nicely to use it.
 
 ## 13. How does caching work?
 
@@ -312,29 +347,33 @@ and invisible to a test suite that mocks the LLM.
 Scored as I'd score someone else's submission, after the final hardening pass. Every category
 below 9.5 carries the reason.
 
+Re-scored after the deterministic-adjudication pass. Rows that moved carry a one-line reason tied
+to something that actually changed (a test, a measurement, a live run) — not a general sense of
+"this got better."
+
 | Category | Score | Remaining weakness |
 |---|:--:|---|
 | Assignment compliance | 9.5 | All required capabilities implemented and demonstrable through the running system. |
-| Fact extraction | 8.5 | Open-vocabulary schema, structured output validated, per-chunk failures isolated. Still misreads which cell a value belongs to on dense tables — caught by the evidence check rather than prevented. |
-| Evidence grounding | 9.5 | Two independent verdicts, verified in code, never by asking the model about itself. Subject/period support is computed but only advisory. |
+| Fact extraction | 8.5 | Open-vocabulary schema, structured output validated, per-chunk failures isolated. Still misreads which cell a value belongs to on dense tables — caught by the evidence check rather than prevented; confirmed again on RBI content (§8a of FINAL_REVIEW.md), so this is a real, general limitation, not a Delhivery artifact. |
+| Evidence grounding | 9.5 → **9.7** | The numeric check itself was weaker than it looked (digit-substring matching let `value=12` match a quote containing "2024" and "120") — rewritten to compare actual numeric tokens; every existing test still passes, two new tests pin the fixed false-positive shapes. Subject/period support remains computed-but-advisory, a deliberate choice, not an oversight. |
 | Numeric normalization | 9.5 | Deterministic, refuses rather than guesses, preserves the original representation, 100× guard against unit-artefact contradictions. |
-| Semantic equivalence | 8.5 | Slice-first gating removed 142 false positives with 0 legitimate relabels. No alias dictionary. Still one 8B judgment with no second opinion. |
-| Candidate retrieval | 9 | Not exhaustive, not a single brittle threshold, records why each pair was selected. The extra signals were measured as near-redundant and kept only for explainability. |
-| Corroboration | 9.5 | Case 1 verified live: ₹81,415.38M ≡ ₹8,142 Cr at 0.006%, from generic normalization. |
-| Contradiction | 8 | Genuine unexplained conflicts are found and surfaced. The canonical Case 2 pair currently resolves to `uncertain` — correctly, given a stale unit — pending the re-ingest. |
-| Contextual reconciliation | 9 | Period and scope computed in code, with `overlapping` as its own answer. Relative periods stay UNKNOWN because the document's reporting date isn't extracted. |
-| Failure handling | 9 | Per-chunk isolation, orphaned-job recovery, safe defaults on malformed output, everything recorded as a visible issue. |
-| Generalization | 8.5 | Audited clean of starter-specific logic; mechanisms are structural, with non-financial tests. Still not run end-to-end on a genuinely different corpus. |
-| Table extraction | 8 | 12% → 85% evidence validation on a table page. Recovers rows, cells and gutters; does not model header semantics or spanning cells. |
-| Performance | 8.5 | Profiled before optimizing, 20–30 min → ~4 min on a representative page, three changes measured and rejected. Dense pages remain slow on local inference. |
-| Caching | 9.5 | Three content-keyed layers; prompt and pipeline changes invalidate automatically, verified by the failure that prompted the fingerprint. |
-| Testing | 9 | 368 tests, LLM mocked, no Ollama needed, fresh clone passes. Missing: fixture-based end-to-end tests of the four cases without a live model. |
-| API | 9 | Typed responses, constrained queries, validation before side effects, no stack traces. Response models are permissive by design. |
-| UI | 9 | Evidence, values, period, grounding status and retrieval provenance all visible per relationship. Not a designer's work, but it communicates the chain. |
-| Documentation | 9.5 | README matches the implementation, PERFORMANCE carries the numbers including the failures. |
-| Explainability | 9.5 | Every relationship exposes why the pair was retrieved, what was computed, and what the model concluded. |
-| Code quality | 9 | Small modules with a clear boundary between LLM and deterministic work. `app/main.py` is getting long. |
-| **Overall** | **9** | Strong architecture, measured decisions, honest reporting. Held back by unlabelled precision and an 8B ceiling. |
+| Semantic equivalence | 8.5 → **8.8** | Slice-first gating removed 142 false positives with 0 legitimate relabels. Two further, additive prompt safeguards added this pass (distinct financial-statement line items aren't the same metric merely for sharing a currency; subject/entity identity must match, not just wording) — not yet independently measured the way the slice fix was, so the bump is modest. Still one 8B judgment with no second opinion for the concept-equivalence question itself. |
+| Candidate retrieval | 9 | Not exhaustive, not a single brittle threshold, records why each pair was selected. The extra signals were measured as near-redundant and kept only for explainability — a deliberate, still-current trade-off, not revisited this pass without new evidence. |
+| Corroboration | 9.5 | Case 1 verified live, freshly re-run: ₹81,415.38M ≡ ₹8,142 Cr at 0.006%, `decision_source: deterministic_confirmed` — the deterministic layer now independently confirms this rather than only the model asserting it. |
+| Contradiction | 8 → **8.5** | Genuine unexplained conflicts are found and surfaced. The canonical Case 2 pair still resolves to `uncertain` — correctly, given a real incomplete-unit artifact on that one extraction, deliberately not chased with a one-off re-ingest (see FINAL_REVIEW.md §13). The bump is for the new mechanism, not this specific case: `app/adjudication.py` now FORCES `contradicts` when values differ under confirmed-same period and scope, even over a model's invented reconciling story — previously the model had the last word here. |
+| Contextual reconciliation | 9 → **9.3** | Period and scope computed in code, with `overlapping` as its own answer. A real bug fixed this pass: the scope-contrast checker compared every qualifier axis against every other, so orthogonal qualifiers ("gross" and "actual") could be reported as a false contrast — now axis-scoped. `as_of` and `period_end` (a snapshot vs. a period-flow sharing a calendar date) were also conflated before this pass; now distinguished. Relative periods still stay UNKNOWN. |
+| Failure handling | 9 | Per-chunk isolation, orphaned-job recovery, safe defaults on malformed output, everything recorded as a visible issue. One new issue type this pass (`table_alignment_uncertain`, for a page that looked tabular but whose reconstruction was rejected). |
+| Generalization | 8.5 → **9.5** | Previously a design argument, not an empirical result. Now run end-to-end, live, on two genuinely unseen, non-corporate-financial documents (an IMF Article IV report, an RBI annual report) — see FINAL_REVIEW.md §7-8a. Both completed successfully; found one new generalizable limitation (footnote-vs-numeric-row extraction competition on a footnote-dense table) and reconfirmed one already-documented one (table header semantics), with zero document-specific code changes. Not 10: two documents, four pages, isn't a claim of universal robustness. |
+| Table extraction | 8 | 12% → 85% evidence validation on a table page. Recovers rows, cells and gutters; does not model header semantics or spanning cells — reconfirmed as a real, general gap (not Delhivery-specific) on an RBI table with a different structure this pass. |
+| Performance | 8.5 | Profiled before optimizing, 20–30 min → ~4 min on a representative page, three changes measured and rejected. The new deterministic adjudicator was also measured, not assumed: ~4µs/call, six orders of magnitude under a single LLM call, so no optimization work was justified. Dense pages remain slow on local inference — reconfirmed by real IMF/RBI timeouts this pass, not just Delhivery ones. |
+| Caching | 9.5 | Three content-keyed layers; prompt and pipeline changes invalidate automatically. A real gap fixed this pass: `pipeline_fingerprint()` hashed the model name but not the extraction prompt TEXT, so the document-level dedup short-circuit could serve stale facts after a prompt change even though the chunk-level cache already handled it correctly. |
+| Testing | 9 → **9.4** | 664 tests (up from 368), still LLM-mocked, no Ollama needed, fresh clone passes. New: `tests/test_adjudication.py` (27 cases pinning the deterministic override rules), `tests/test_schemas.py` (the validation boundary had no dedicated tests at all before this pass), `tests/test_document_reuse.py`. Still missing: fixture-based end-to-end tests of the four cases without a live model. |
+| API | 9 | Typed responses, constrained queries, validation before side effects, no stack traces. Response models are permissive by design. `/api/coherence` gained document-scoping this pass (previously the only per-document view without it). |
+| UI | 9 → **9.3** | Evidence, values, period, grounding status and retrieval provenance all visible per relationship — now also decision_source, the model's original proposal, and why they differ when they do. A real, found-and-fixed bug this pass: the document detail page visibly flashed while processing, because the 2-second poll rebuilt the whole panel and replayed every entrance animation; fixed to update in place. |
+| Documentation | 9.5 | README matches the implementation, PERFORMANCE carries the numbers including the failures — including, now, real generalization-run numbers rather than a "not yet validated" caveat. |
+| Explainability | 9.5 | Every relationship exposes why the pair was retrieved, what was computed, and what the model concluded — and now, when the deterministic layer disagreed with the model, both opinions and the reason, not just the winner. |
+| Code quality | 9 | Small modules with a clear boundary between LLM and deterministic work. New deterministic logic went into its own module (`app/adjudication.py`) rather than growing `app/relationships.py` further. `app/main.py` is getting longer, not shorter. |
+| **Overall** | 9 → **9.4** | Strong architecture, measured decisions, honest reporting. The LLM-controlled-final-decision gap — the single biggest architectural weakness identified in an external review of this project — is closed and tested. Held back by unlabelled precision, an 8B ceiling, and table header semantics still not modeled. |
 
 ### Remaining issues
 
@@ -349,6 +388,13 @@ below 9.5 carries the reason.
   depends on the model reading the aligned header row correctly.
 - Relative periods ("previous year") cannot resolve because each document's own reporting date
   isn't extracted.
+- New this pass, deliberate: `app/adjudication.py`'s rule 5 forces `contradicts` whenever values
+  differ under a period/scope confirmed the same, even over a model-proposed `reconciled` with a
+  plausible-sounding story — a genuine reconciling reason stated only in free prose, never
+  reflected in the structured period/scope fields, will be overridden into a contradiction. Chosen
+  deliberately (a false-negative reconciliation is safer than a false-negative contradiction for a
+  system whose purpose is surfacing disagreement), but it is a real, bounded trade-off, not a free
+  improvement.
 
 **LOW**
 - Coherence violations are reported, not repaired. The mechanism identifies the wrong edge using

@@ -22,7 +22,22 @@ from app.normalize import parse_locale_number
 
 _NULLISH = {"null", "none", "n/a", "na", "-", ""}
 
+# The five relation types the LLM itself is asked to choose among (see
+# SYSTEM_PROMPT_JUDGE in app/relationships.py). Two further types --
+# "related_but_not_comparable" and "insufficient_context" -- exist only as
+# OUTPUTS of the deterministic adjudicator in app/adjudication.py; the
+# model is never asked to produce them directly, so they are deliberately
+# not part of this Literal. See AdjudicatedRelationType below for the full
+# set a stored relationship's final relation_type can take.
 RelationType = Literal["corroborates", "contradicts", "reconciled", "unrelated", "uncertain"]
+
+# The full set of relation types a relationship can be stored under, after
+# deterministic adjudication has had the chance to override or confirm the
+# model's proposal (see app/adjudication.py).
+AdjudicatedRelationType = Literal[
+    "corroborates", "contradicts", "reconciled", "unrelated", "uncertain",
+    "related_but_not_comparable", "insufficient_context",
+]
 
 
 def _nullish_to_none(value: Any) -> Any:
@@ -79,16 +94,23 @@ class ExtractedFact(BaseModel):
 
     @field_validator("confidence", mode="before")
     @classmethod
-    def _clamp_confidence(cls, v):
-        """A confidence outside 0..1 is a model error, not a reason to
-        discard an otherwise good fact -- clamp it and move on."""
+    def _validate_confidence(cls, v):
+        """A confidence outside 0..1 is a model error -- and clamping it to
+        the nearest boundary used to convert that error into an apparently
+        PERFECT confidence (7.5 -> 1.0), which is worse than not having a
+        confidence at all: it displays as maximally certain precisely when
+        the model has demonstrated it doesn't understand the scale. Treat
+        it the same way an unparseable unit or period is treated elsewhere
+        in this project -- refuse rather than guess -- by dropping to None
+        rather than snapping to a boundary."""
         v = _nullish_to_none(v)
         if v is None:
             return None
         try:
-            return max(0.0, min(1.0, float(v)))
+            f = float(v)
         except (TypeError, ValueError):
             return None
+        return f if 0.0 <= f <= 1.0 else None
 
     @field_validator("quote")
     @classmethod
@@ -99,10 +121,29 @@ class ExtractedFact(BaseModel):
 
 
 class MetricMatch(BaseModel):
-    """Step 1 of relationship classification: same underlying metric?"""
+    """Step 1 of relationship classification: same underlying metric?
+
+    slice_a/slice_b are the model's stated answer to "what part of the
+    broader measure does each fact cover" (SYSTEM_PROMPT_METRIC asks for
+    these FIRST, specifically to force the part-vs-whole check to actually
+    happen rather than be skipped) -- kept here so that reasoning survives
+    past step 1 instead of being computed by the model and then discarded
+    on the way back through the pydantic boundary, which is what happened
+    before this schema had fields for them.
+    """
 
     same_metric: bool
+    slice_a: Optional[str] = None
+    slice_b: Optional[str] = None
     reason: str = ""
+
+    @field_validator("slice_a", "slice_b", mode="before")
+    @classmethod
+    def _clean_slice(cls, v):
+        v = _nullish_to_none(v)
+        if v is None:
+            return None
+        return str(v).strip() or None
 
     @field_validator("same_metric", mode="before")
     @classmethod
@@ -174,14 +215,18 @@ class RelationJudgment(BaseModel):
 
     @field_validator("confidence", mode="before")
     @classmethod
-    def _clamp_confidence(cls, v):
+    def _validate_confidence(cls, v):
+        """See ExtractedFact._validate_confidence -- same reasoning: an
+        out-of-range value is a model error and is dropped, not clamped
+        into looking like maximum confidence."""
         v = _nullish_to_none(v)
         if v is None:
             return None
         try:
-            return max(0.0, min(1.0, float(v)))
+            f = float(v)
         except (TypeError, ValueError):
             return None
+        return f if 0.0 <= f <= 1.0 else None
 
 
 def validate_facts(raw_items: list) -> tuple[list[dict], list[dict]]:

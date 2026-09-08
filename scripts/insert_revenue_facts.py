@@ -30,7 +30,7 @@ idx = text22.lower().index("standalone")
 window = text22[max(0, idx - 30):idx + 170]
 
 chunk = Chunk(page_number=22, text=window)
-facts, issues, cache_hit = extract_facts_from_chunk(chunk, "02-delhivery-annual-report-fy24-excerpt.pdf")
+facts, issues, cache_hit = extract_facts_from_chunk(chunk)
 print(f"cache_hit={cache_hit}  facts={len(facts)}  issues={len(issues)}")
 
 statements = [f["statement"] for f in facts]

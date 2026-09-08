@@ -135,6 +135,87 @@ class TestScopeComparison:
         assert compare_scopes("larval", "adult").relation == DIFFERENT
 
 
+class TestScopeAxesDoNotCrossContaminate:
+    """Regression tests for a real bug: contrast-checking used to compare
+    every qualifier group against every OTHER group in one flat list, not
+    just designed opposites -- so "gross" (a consolidation-unrelated
+    qualifier) and "actual" (a reporting-basis qualifier) were reported as
+    CONTRASTING scopes purely because they occupied different list
+    positions. A figure can be gross AND actual at once; the two words
+    describe orthogonal things."""
+
+    def test_a_shared_segment_with_orthogonal_qualifiers_overlaps_not_differs(self):
+        """The shape of the bug that actually matters: two facts about the
+        SAME segment, each further qualified on a different, unrelated
+        axis. The old flat cross-axis check treated 'gross' (scope) and
+        'actual' (basis) as a designed opposite pair and reported DIFFERENT
+        even though both facts agree on 'north segment' -- overriding a
+        real shared-context signal with a false one. Fixed, this is at
+        worst OVERLAPPING (the two facts partly agree but aren't
+        identical), never a confident DIFFERENT."""
+        result = compare_scopes("north segment gross", "north segment actual")
+        assert result.relation != DIFFERENT
+
+    def test_orthogonal_bare_qualifiers_with_no_shared_context_still_differ(self):
+        """With nothing else in common, two single unrelated-axis words
+        fall back to the same "unfamiliar qualifier, compared as a plain
+        token" rule as any other non-overlapping pair (see
+        test_an_unfamiliar_qualifier_is_still_compared): the fix changes
+        WHY this is DIFFERENT (no longer a false claim of a designed
+        contrast), not whether two totally unrelated single words are
+        related."""
+        result = compare_scopes("gross", "actual")
+        assert result.relation == DIFFERENT
+        assert "contrasting" not in result.detail
+
+    def test_same_axis_contrasts_are_unaffected_by_the_fix(self):
+        """The fix must not weaken real, same-axis contrasts."""
+        assert compare_scopes("gross", "net").relation == DIFFERENT
+        assert compare_scopes("actual", "forecast").relation == DIFFERENT
+        assert compare_scopes("consolidated", "standalone").relation == DIFFERENT
+
+    def test_scope_axis_contrasts_are_labeled_scope(self):
+        assert compare_scopes("consolidated", "standalone").dimension == "scope"
+
+    def test_basis_axis_contrasts_are_labeled_basis(self):
+        assert compare_scopes("actual", "forecast").dimension == "basis"
+
+
+class TestPeriodEndIsNotAPointInTimeSnapshot:
+    """Regression test for a real semantic bug: 'year ended March 31, 2024'
+    (a twelve-month flow) and 'as of March 31, 2024' (a point-in-time
+    balance) used to parse to the identical 'as_of' kind and, sharing a
+    date, compare as SAME -- silently erasing the difference between a
+    period total and a snapshot that happen to share a calendar anchor."""
+
+    def test_period_end_and_as_of_on_the_same_date_are_not_confirmed_same(self):
+        result = compare_periods(
+            "Revenue for the year ended March 31, 2024",
+            "Cash balance as of March 31, 2024",
+        )
+        assert result.relation == OVERLAPPING
+        assert result.distinguishing is False
+
+    def test_period_end_and_as_of_on_different_dates_are_different(self):
+        result = compare_periods(
+            "the year ended March 31, 2024", "as of June 30, 2024",
+        )
+        assert result.relation == DIFFERENT
+
+    def test_two_period_ends_on_the_same_date_are_same(self):
+        assert compare_periods(
+            "year ended 31 March 2024", "for the year ended March 31, 2024",
+        ).relation == SAME
+
+    def test_a_period_end_and_its_own_fiscal_year_label_are_same(self):
+        """'Year ended March 31, 2024' is just another way of naming
+        FY2024 -- unlike as_of, it's still a period, not a snapshot."""
+        assert compare_periods("year ended March 31, 2024", "FY2024").relation == SAME
+
+    def test_a_period_end_and_a_bare_calendar_year_only_overlap(self):
+        assert compare_periods("year ended March 31, 2024", "2024").relation == OVERLAPPING
+
+
 class TestPromptFormatting:
     """Context explains a *difference*. When the values agree there is no
     difference to explain, and saying anything about explaining one is

@@ -15,6 +15,8 @@ the more useful experiments.
 - [Rejected: widening hybrid candidate retrieval](#rejected-widening-hybrid-candidate-retrieval)
 - [Fixed after real-data testing: arithmetic false positives](#fixed-after-real-data-testing-arithmetic-false-positives)
 - [Measured and not built: fact deduplication](#measured-and-not-built-fact-deduplication)
+- [Deterministic adjudication: measured overhead](#deterministic-adjudication-measured-overhead)
+- [Generalization run: IMF/RBI documents, real timings](#generalization-run-imfrbi-documents-real-timings)
 
 ---
 
@@ -548,3 +550,88 @@ not, so the model still has to infer the label and sometimes declines to.
 
 Fixing it properly means propagating header rows into each data row — the natural next step, and
 the reason "header semantics" is listed under remaining limitations rather than claimed as solved.
+
+---
+
+## Deterministic adjudication: measured overhead
+
+The biggest architectural change in this pass adds a deterministic adjudicator
+(`app/adjudication.py`) between the model's step-2 proposal and what actually gets stored — it
+re-runs the same period/scope/value comparison logic already computed for the prompt and decides
+the final `relation_type` in code wherever that comparison is conclusive. The concern worth
+actually measuring, not assuming: does re-running that logic and adding a decision layer cost
+anything against a wall-clock budget that's 93% dominated by a single LLM call per pair?
+
+Measured directly (`timeit`-style loop, 10,000 iterations, this machine):
+
+| | time per call |
+|---|---:|
+| `adjudicate()` alone | **4.17 µs** |
+| full chain: `compare_values` + `compare_periods` + `compare_scopes` + `adjudicate()` | **122.47 µs** |
+| one relationship-judgment LLM call (`llama3.1:8b`, local) | **30s – several minutes** |
+
+The full deterministic chain costs roughly **six orders of magnitude less time** than the single
+LLM call it wraps. This matches the expectation going in (pure Python dict/dataclass logic, no I/O,
+no new model call) rather than contradicting it, so there was no optimization work to do here —
+consistent with this project's own rule of only optimizing what's actually measured to matter.
+`build_relationships_for_document`'s own per-stage timing (`candidate_retrieval_seconds` vs
+`llm_reasoning_seconds`, both already reported in `stats.timing`) confirms the same story at the
+whole-document level: relationship reasoning time is LLM-bound before and after this pass, to
+within measurement noise.
+
+---
+
+## Generalization run: IMF/RBI documents, real timings
+
+See [FINAL_REVIEW.md](FINAL_REVIEW.md) for what was ingested and what was found; this is just the
+timing data, from the real `stats.timing` breakdown of each run.
+
+**IMF India Article IV report, pages 44 + 47 (2 pages, 7 chunks, 12 facts, 46 candidate pairs):**
+
+| stage | time |
+|---|---:|
+| PDF extraction | 1.0s |
+| Fact extraction (LLM) | 1665.4s (27m 45s) |
+| Embeddings | 4.4s |
+| Candidate retrieval | 0.9s |
+| Relationship reasoning (LLM) | 481.0s (8m 1s) |
+| Coherence | 0.07s |
+| **Total** | **2148.6s (35m 49s)** |
+
+Fact extraction is 77.5% of wall-clock time here (vs. the ~93% previously measured on Delhivery) —
+lower specifically because **4 of the page's chunks timed out at the full 240s ceiling without
+producing anything**, which still counts as elapsed extraction time but doesn't reflect productive
+LLM throughput the way a successful call does. This is consistent with, not contradictory to, the
+original profiling: the bottleneck is still squarely the local LLM call, both when it succeeds and
+when it doesn't.
+
+**RBI Annual Report, pages 91 + 95 — first attempt (concurrent with the IMF run above):** 2 of 7
+chunks completed before both timed out under contention; cancelled after ~723s with 0 facts stored
+(cooperative cancellation confirmed: `cancel_requested` honored, no partial work corrupted).
+Direct evidence for the documented "concurrent local-model calls contend for CPU" finding, now
+observed between two *different* documents' background jobs, not just two chunks of one.
+
+**RBI Annual Report, pages 91 + 95 — retry, sequential, no contention (2 pages, 7 chunks, 21 facts,
+67 candidate pairs):**
+
+| stage | time |
+|---|---:|
+| PDF extraction | 0.7s |
+| Fact extraction (LLM) | 1391.2s (23m 11s) |
+| Embeddings | 0.4s |
+| Candidate retrieval | 1.3s |
+| Relationship reasoning (LLM) | 576.8s (9m 37s) |
+| Coherence | 0.05s |
+| **Total** | **1970.3s (32m 50s)** |
+
+Fact extraction is 70.6% of wall-clock time (again lower than the ~93% historical figure because
+several chunks still hit the 240s timeout ceiling even without cross-document contention — page 95
+alone had 2 more timeouts). The relationship-reasoning share (29.3%) is notably higher than the
+IMF run's (22.4%) despite similar page counts, simply because RBI's page yielded more genuinely
+numeric, comparable facts (21 vs. 12) and therefore more candidate pairs worth a real two-step
+judgment (67 vs. 46) — consistent with the architecture's own design (reasoning cost scales with
+how much there is to compare, not with document size directly).
+
+**Combined generalization wall-clock cost: ~68 minutes of local-model time across two documents,
+four pages, for a definitive empirical answer to "does this generalize" — cheap relative to the
+alternative of asserting it.**

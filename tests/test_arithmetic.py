@@ -167,6 +167,54 @@ class TestGrouping:
         report = check_arithmetic_consistency(facts)
         assert report.facts_considered == len(BALANCE_SHEET)
 
+    def test_the_same_period_written_two_ways_is_one_group(self):
+        """Regression test: grouping used to key on the RAW period string,
+        so "FY24" and "FY2023-24" -- one fiscal year written two ways, per
+        app/context.py -- landed in separate groups and could never be
+        checked against each other, even though the two modules exist
+        specifically to agree on what "the same period" means."""
+        facts = [
+            _f("Liabilities", 23083.74, period="FY24"),
+            _f("Equity", 91446.46, period="FY2023-24"),
+            _f("Assets", 114530.20, period="FY 2024"),
+        ]
+        report = check_arithmetic_consistency(facts)
+        assert len(report.identities) == 1
+
+    def test_a_fiscal_year_and_a_calendar_year_of_one_number_stay_separate(self):
+        """The canonicalization must not over-merge: a fiscal year and a
+        bare calendar year of the same number are related but not
+        confirmed identical (see app/context.py OVERLAPPING) and must not
+        be summed as if they were the same window."""
+        facts = [
+            _f("Revenue", 100, period="FY24"),
+            _f("Other income", 50, period="2024"),
+            _f("Total income", 150, period="FY24"),
+        ]
+        assert check_arithmetic_consistency(facts).identities == []
+
+    def test_an_unparseable_period_still_groups_by_its_own_raw_text(self):
+        facts = [
+            _f("Revenue", 100, period="the reporting period"),
+            _f("Other income", 50, period="the reporting period"),
+            _f("Total income", 150, period="the reporting period"),
+        ]
+        report = check_arithmetic_consistency(facts)
+        assert len(report.identities) == 1
+
+
+class TestGroupTruncationIsSurfaced:
+    def test_a_group_within_the_cap_is_not_reported_as_truncated(self):
+        report = check_arithmetic_consistency(BALANCE_SHEET)
+        assert report.groups_truncated == 0
+
+    def test_a_group_over_the_cap_is_counted_and_named_in_the_summary(self):
+        from app.arithmetic import MAX_GROUP_SIZE
+        facts = [_f(f"Line {i}", float(i + 1)) for i in range(MAX_GROUP_SIZE + 5)]
+        report = check_arithmetic_consistency(facts)
+        assert report.groups_truncated == 1
+        assert "capped" in report.summary()
+
 
 class TestReportShape:
     def test_summary_is_human_readable(self):

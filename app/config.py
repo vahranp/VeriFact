@@ -145,22 +145,37 @@ LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "1"))
 #
 # So reuse now requires the pipeline fingerprint to match too. Bump
 # PIPELINE_VERSION whenever a change alters what the pipeline would extract
-# from the same bytes -- PDF text extraction, chunking, or the grounding
-# and evidence rules. Model and prompt changes are covered automatically
-# because they are folded into the fingerprint below.
-PIPELINE_VERSION = "2"
+# from the same bytes in a way this fingerprint doesn't already capture
+# (e.g. a table-reconstruction algorithm change) -- model and prompt
+# changes no longer need a manual bump, see below.
+#
+# Bumped to "3" for this pass: facts now carry a table_context signal
+# (app/tables.py) that didn't exist under fingerprint "2".
+PIPELINE_VERSION = "3"
 
 
 def pipeline_fingerprint() -> str:
     """Identifies the extraction behaviour a stored document was produced
     by. Deliberately excludes anything that doesn't change extraction
     output (timeouts, concurrency, similarity thresholds) so unrelated
-    config edits don't force needless re-ingestion."""
+    config edits don't force needless re-ingestion.
+
+    Includes the actual extraction SYSTEM_PROMPT text, not just the model
+    name -- a real gap until this pass: changing the prompt already
+    invalidated the chunk-level extraction cache (its key includes the
+    prompt directly), but the DOCUMENT-level dedup short-circuit ran
+    first and had no way to know the prompt had changed, so a re-uploaded
+    byte-identical PDF could silently keep serving facts extracted under
+    the OLD prompt. Imported locally (not at module level) because
+    app/fact_extraction.py imports from this module -- a top-level import
+    the other way would be circular."""
     from app.cache import hash_text
+    from app.fact_extraction import SYSTEM_PROMPT as _EXTRACTION_PROMPT
 
     return hash_text(
         PIPELINE_VERSION,
         EXTRACTION_MODEL,
+        _EXTRACTION_PROMPT,
         str(MAX_CHUNK_CHARS),
         str(CHUNK_OVERLAP_CHARS),
         str(MIN_PAGE_CHARS),

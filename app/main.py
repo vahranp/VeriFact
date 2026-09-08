@@ -88,6 +88,18 @@ def _enrich_fact(fact: dict, cache: dict) -> dict:
     return out
 
 
+def _enrich_relationship(r: dict) -> dict:
+    """Parses the stored adjudication trace (see app/adjudication.py,
+    app/db.py's relationships.adjudication_json) into a real object for the
+    API instead of a raw JSON string, and normalizes disagreement to an
+    actual bool -- SQLite has no boolean type, so it comes back as 0/1."""
+    out = dict(r)
+    adjudication_json = out.pop("adjudication_json", None)
+    out["adjudication_checks"] = json.loads(adjudication_json) if adjudication_json else None
+    out["disagreement"] = bool(out.get("disagreement"))
+    return out
+
+
 # ---------------- documents ----------------
 
 @app.post("/api/documents", response_model=UploadAccepted,
@@ -299,7 +311,10 @@ def list_facts(
     document_id: Optional[int] = Query(None, ge=1),
     q: Optional[str] = Query(None, max_length=200, description="Case-insensitive substring match on statement, subject or attribute."),
 ):
-    facts = db.list_facts(document_id)
+    # A reused (deduplicated) document owns no fact rows of its own --
+    # without resolving through the reuse pointer here, this would
+    # silently return [] for a document the UI reports as "done".
+    facts = db.list_facts(db.resolve_document_id(document_id))
     if q:
         ql = q.lower()
         facts = [
@@ -328,7 +343,7 @@ def get_fact(fact_id: int = PathParam(ge=1)):
         other_id = r["fact_id_b"] if r["fact_id_a"] == fact_id else r["fact_id_a"]
         other = db.get_fact(other_id)
         rel_out.append({
-            **r,
+            **_enrich_relationship(r),
             "other_fact": _enrich_fact(other, cache) if other else None,
         })
     enriched["relationships"] = rel_out
@@ -340,7 +355,10 @@ def get_fact(fact_id: int = PathParam(ge=1)):
 @app.get("/api/relationships", response_model=list[RelationshipOut],
          summary="Judged relationships between facts, with both sides inlined")
 def list_relationships(
-    relation_type: Optional[Literal["corroborates", "contradicts", "reconciled", "uncertain"]] = Query(
+    relation_type: Optional[Literal[
+        "corroborates", "contradicts", "reconciled", "uncertain",
+        "related_but_not_comparable", "insufficient_context",
+    ]] = Query(
         None, description="Filter by type. An unrecognised value is rejected with 422 rather than silently returning nothing.",
     ),
 ):
@@ -355,7 +373,7 @@ def list_relationships(
             fb.get("value_numeric") if fb else None, fb.get("unit") if fb else None,
         ) if fa and fb else None
         out.append({
-            **r,
+            **_enrich_relationship(r),
             "fact_a": _enrich_fact(fa, cache) if fa else None,
             "fact_b": _enrich_fact(fb, cache) if fb else None,
             # Recomputed at read time from app/normalize.py -- the same
@@ -410,21 +428,42 @@ def stats():
 
 
 @app.get("/api/coherence", response_model=CoherenceOut,
-         summary="Logically impossible relationship triangles, and edges implied by transitivity")
-def graph_coherence(limit: int = Query(25, ge=1, le=200)):
+         summary="Logically impossible relationship triangles, and edges implied by transitivity",
+         responses={404: {"description": "No such document"}})
+def graph_coherence(limit: int = Query(25, ge=1, le=200), document_id: Optional[int] = Query(None, ge=1)):
     """Logical coherence of the relationship graph.
 
     Relationships are judged pairwise and in isolation, so the graph they
     form can be internally impossible: if A corroborates B and B
-    corroborates C, then A cannot contradict C. Triangles like that prove
-    at least one of those judgments is wrong -- with no ground truth, no
-    reviewer, and no extra model call. The same transitivity also implies
-    edges that candidate retrieval never shortlisted.
+    corroborates C, then A cannot contradict C. Triangles like that mean at
+    least one of those judgments is wrong -- with no ground truth, no
+    reviewer, and no extra model call. That's a strict proof when every
+    equality edge involved rests on a deterministic numeric check, and
+    strong (but not literally mathematical) evidence when one rests only on
+    the model's own qualitative reading -- see each violation's
+    is_strict_proof field. The same transitivity also implies edges that
+    candidate retrieval never shortlisted.
+
+    document_id scopes this to triangles touching at least one of that
+    document's own facts (same resolve-through-reuse handling as
+    /api/facts and /api/priority) -- the rest of the corpus is still used
+    to CLOSE a triangle (a document's fact compared against another
+    document's), just not to originate one entirely outside it.
 
     See app/coherence.py.
     """
+    if document_id is not None and not db.get_document(document_id):
+        raise HTTPException(404, "Document not found")
+    document_id = db.resolve_document_id(document_id)
+
     relationships = db.list_relationships()
     facts_by_id = {f["id"]: f for f in db.list_facts()}
+    if document_id is not None:
+        doc_fact_ids = {fid for fid, f in facts_by_id.items() if f.get("document_id") == document_id}
+        relationships = [
+            r for r in relationships
+            if r.get("fact_id_a") in doc_fact_ids or r.get("fact_id_b") in doc_fact_ids
+        ]
     report = check_coherence(relationships, facts_by_id=facts_by_id)
 
     cache: dict = {}
@@ -456,12 +495,18 @@ def graph_coherence(limit: int = Query(25, ge=1, le=200)):
                 "facts": [describe(fid) for fid in v.fact_ids],
                 "description": v.describe(),
                 "reason": v.reason,
+                # See app/coherence.py::Violation.is_strict_proof -- true
+                # only when every equality edge in this triangle rests on a
+                # deterministic numeric check, not merely the model's own
+                # "same status" reading.
+                "is_strict_proof": v.is_strict_proof,
                 "suspect_relationship_id": v.suspect.get("id"),
                 "edges": [
                     {
                         "id": e.get("id"),
                         "relation_type": e.get("relation_type"),
                         "confidence": e.get("confidence"),
+                        "decision_source": e.get("decision_source"),
                         "fact_id_a": e.get("fact_id_a"),
                         "fact_id_b": e.get("fact_id_b"),
                         "is_suspect": e.get("id") == v.suspect.get("id"),
@@ -499,6 +544,10 @@ def priority(document_id: Optional[int] = Query(None, ge=1), limit: int = Query(
     """
     if document_id is not None and not db.get_document(document_id):
         raise HTTPException(404, "Document not found")
+    # A reused (deduplicated) document owns no facts of its own -- rank
+    # against the document it was reused from, or this silently ranks an
+    # empty set for a document the UI reports as "done".
+    document_id = db.resolve_document_id(document_id)
 
     facts = db.list_facts()
     relationships = db.list_relationships()
@@ -521,7 +570,7 @@ def priority(document_id: Optional[int] = Query(None, ge=1), limit: int = Query(
         ],
         "relationships": [
             {
-                **r,
+                **_enrich_relationship(r),
                 "fact_a": _enrich_fact(db.get_fact(r["fact_id_a"]), cache) if db.get_fact(r["fact_id_a"]) else None,
                 "fact_b": _enrich_fact(db.get_fact(r["fact_id_b"]), cache) if db.get_fact(r["fact_id_b"]) else None,
                 "priority_level": score.level, "priority_score": score.score,
@@ -545,6 +594,9 @@ def timelines(document_id: Optional[int] = Query(None, ge=1)):
     """
     if document_id is not None and not db.get_document(document_id):
         raise HTTPException(404, "Document not found")
+    # See the identical note in priority() above -- a reused document owns
+    # no facts of its own.
+    document_id = db.resolve_document_id(document_id)
 
     facts = db.list_facts()
     relationships = db.list_relationships()

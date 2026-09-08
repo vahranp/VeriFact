@@ -150,6 +150,60 @@ class TestRelationshipComparisonEnrichment:
                 assert r["normalized_comparison"]["comparable"] is False
 
 
+class TestCoherenceCanBeScopedToADocument:
+    """/api/coherence used to have no document_id parameter at all --
+    every other per-document view (facts, relationships, priority,
+    timelines) could be scoped to one document, this one could not."""
+
+    def test_document_id_is_accepted(self, client):
+        assert client.get("/api/coherence", params={"document_id": 1}).status_code in (200, 404)
+
+    def test_a_nonexistent_document_is_404(self, client):
+        assert client.get("/api/coherence", params={"document_id": 999999999}).status_code == 404
+
+    def test_scoping_narrows_or_matches_the_unscoped_count(self, client):
+        """A document-scoped view can never see MORE triangles than the
+        whole corpus -- it's a subset of the same graph."""
+        docs = client.get("/api/documents").json()
+        done = next((d for d in docs if d["status"] == "done"), None)
+        if not done:
+            pytest.skip("no completed document in the dev database this suite runs against")
+        overall = client.get("/api/coherence").json()["triangles_checked"]
+        scoped = client.get("/api/coherence", params={"document_id": done["id"]}).json()["triangles_checked"]
+        assert scoped <= overall
+
+    def test_a_non_positive_document_id_is_rejected(self, client):
+        assert client.get("/api/coherence", params={"document_id": 0}).status_code == 422
+
+
+class TestAdjudicationTraceIsExposed:
+    """GET /api/relationships and GET /api/priority must expose the
+    deterministic adjudication trace (app/adjudication.py), not just the
+    final relation_type -- the whole point of the disagreement feature is
+    that it's inspectable, not just internally enforced."""
+
+    def test_every_relationship_carries_the_adjudication_fields(self, client):
+        rels = client.get("/api/relationships").json()
+        assert rels, "expected at least one relationship in the dev database this suite runs against"
+        for key in ("decision_source", "llm_proposal", "disagreement", "disagreement_reason", "adjudication_checks"):
+            assert all(key in r for r in rels)
+
+    def test_disagreement_is_a_real_bool_not_a_sqlite_integer(self, client):
+        rels = client.get("/api/relationships").json()
+        assert all(isinstance(r["disagreement"], bool) for r in rels)
+
+    def test_adjudication_checks_is_parsed_json_not_a_raw_string(self, client):
+        rels = client.get("/api/relationships").json()
+        with_checks = [r for r in rels if r["adjudication_checks"] is not None]
+        assert all(isinstance(r["adjudication_checks"], dict) for r in with_checks)
+
+    def test_priority_relationships_also_carry_the_adjudication_fields(self, client):
+        rels = client.get("/api/priority").json()["relationships"]
+        for r in rels:
+            assert "decision_source" in r and "disagreement" in r
+            assert isinstance(r["disagreement"], bool)
+
+
 class TestQueryValidation:
     def test_an_unrecognised_relation_type_is_rejected(self, client):
         """Previously a typo silently returned an empty list, which reads
@@ -157,7 +211,10 @@ class TestQueryValidation:
         r = client.get("/api/relationships", params={"relation_type": "corroberates"})
         assert r.status_code == 422
 
-    @pytest.mark.parametrize("relation", ["corroborates", "contradicts", "reconciled", "uncertain"])
+    @pytest.mark.parametrize("relation", [
+        "corroborates", "contradicts", "reconciled", "uncertain",
+        "related_but_not_comparable", "insufficient_context",
+    ])
     def test_valid_relation_types_are_accepted(self, client, relation):
         assert client.get("/api/relationships", params={"relation_type": relation}).status_code == 200
 

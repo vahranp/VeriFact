@@ -17,13 +17,22 @@ same metric?" from "given a deterministic value comparison, how do they
 relate?" -- and handing the second step a normalized comparison computed
 in code (app/normalize.py) rather than asking it to convert crore to
 million itself -- removes both failure points from a single call.
+
+Step 2's own answer is still only a PROPOSAL. app/adjudication.py checks it
+against the same deterministic comparison the prompt was given and, where
+that comparison is conclusive, decides the final relation_type in code --
+confirming the model when it agrees, overriding it when it doesn't, and
+recording either outcome (see Adjudication.decision_source) rather than
+trusting the model's word that it followed the instruction to "trust" the
+computed comparison. See classify_pair.
 """
 import time
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app import db
-from app.cache import canonical_pair_order, hash_fact_pair, hash_text
+from app.adjudication import adjudicate
+from app.cache import canonical_pair_order, hash_text
 from app.config import (
     LLM_CONCURRENCY, REASONING_MODEL, REASONING_TIMEOUT_SECONDS,
     SIMILARITY_TOP_K,
@@ -79,7 +88,18 @@ HYBRID_MAX_POOL = 4000
 # "unrelated" stays unstored -- it is the overwhelming majority of
 # candidate pairs and asserts nothing, so persisting it would bloat the
 # graph with non-findings.
-STORED_RELATIONS = ("corroborates", "contradicts", "reconciled", "uncertain")
+#
+# "related_but_not_comparable" and "insufficient_context" are outputs of
+# the deterministic adjudicator (app/adjudication.py), never proposed by
+# the model directly -- they separate two things "uncertain" used to
+# collapse together: a STRUCTURAL fact ("these two numbers cannot be
+# reduced to a common unit") from a genuine ADMISSION of not knowing
+# ("the evidence doesn't say whether the period/scope difference explains
+# this gap"). Both are findings worth keeping, same rationale as uncertain.
+STORED_RELATIONS = (
+    "corroborates", "contradicts", "reconciled", "uncertain",
+    "related_but_not_comparable", "insufficient_context",
+)
 
 # ---------------------------------------------------------------- step 1 --
 
@@ -116,8 +136,10 @@ whether the underlying measure is the same.
 When the slices DO match, judge the measure by real-world meaning rather than identical wording: \
 business and accounting terminology uses several words for one concept depending on the \
 document/author (e.g. "net worth" = "total equity" = "shareholders' equity"; "revenue" = \
-"revenue from operations" = "turnover" = "sales"; "gross merchandise value" = "GMV"). When two \
-whole-slice facts could plausibly be different names for the same measure, answer yes.
+"revenue from operations" = "turnover" = "sales"; "gross merchandise value" = "GMV"; and outside \
+finance entirely, "headcount" = "number of employees" = "staff strength" -- the same kind of \
+terminology variation happens in any domain, not just accounting). When two whole-slice facts \
+could plausibly be different names for the same measure, answer yes.
 
 But two facts about the same person, company, or subject are NOT automatically the same metric \
 just because they share a subject -- check whether they measure the SAME aspect of that \
@@ -129,6 +151,18 @@ different regulatory requirements, not the same metric -- answer no. And two fac
 physically different things (a warehouse in one city vs. a warehouse in another city; one \
 company's stake in one investee vs. its stake in a different investee) are not the same metric \
 merely because they share a similar sentence structure -- answer no.
+
+Two DIFFERENT line items from the same set of financial statements are not the same metric just \
+because both are expressed in the same currency or unit -- revenue and a net loss, an asset and \
+a liability, a cost and a headcount are each measuring something different, even side by side in \
+the same filing. Only answer yes when the two facts name the SAME real-world quantity under \
+different words, never merely because they are two different figures drawn from one document.
+
+And the two facts must be about the SAME real-world entity, not merely similarly-named ones: a \
+subsidiary and its parent, or two distinctly-named organisations that happen to share a word in \
+their names, are different subjects even when they report the identical kind of measure -- check \
+that Fact A's subject and Fact B's subject genuinely refer to one thing before calling them the \
+same metric.
 
 Respond with ONLY this JSON object. Fill in the slice fields FIRST -- naming them explicitly is \
 what forces the stage-2 check to actually happen rather than being skipped:
@@ -163,7 +197,11 @@ figures are not expected to match; that is "reconciled", not a contradiction.
 
 Decide exactly one relation_type:
 - "corroborates": the values agree (directly, or per the normalized comparison below) for the \
-same time period and scope -- or, for non-numeric facts, the statements assert the same status.
+same time period and scope -- or, for non-numeric facts, the statements assert the same status. \
+A fact stating a specific number (including zero) is NOT corroborated by a fact merely stating \
+that no information, disclosure, or data was found on the topic -- "zero complaints were filed" \
+and "the report does not discuss complaints" are different claims, and the second does not \
+confirm the first. Prefer "unrelated" or "uncertain" over "corroborates" for a pair like that.
 - "contradicts": the values disagree (directly, or per the normalized comparison below), AND \
 the time period, scope, and unit are the same or not distinguishing -- there is no stated reason \
 the numbers should differ. Flag this even at moderate confidence rather than defaulting away \
@@ -263,13 +301,20 @@ def classify_metric_match(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_nam
     """Step 1: do these two facts denote the same real-world metric? Cached
     separately from step 2 (different prompt, different question) under
     its own hash namespace, so it survives independently of whatever the
-    final judge prompt does."""
-    pair_hash = hash_text(REASONING_MODEL, "step1_metric", SYSTEM_PROMPT_METRIC, hash_fact_pair(fact_a, fact_b))
+    final judge prompt does.
+
+    The cache key hashes the actual rendered prompt text rather than a
+    hand-maintained list of "the fields that matter" (the older
+    hash_fact_pair approach): if _fact_block's rendering ever changes to
+    surface a field it didn't before, the key changes automatically along
+    with it, instead of silently continuing to key off a field list that
+    no longer matches what the model is actually shown."""
+    user_prompt = _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" + _fact_block("FACT B", fact_b, doc_b_name)
+    pair_hash = hash_text(REASONING_MODEL, "step1_metric", SYSTEM_PROMPT_METRIC, user_prompt)
     cached = db.get_cached_relationship(pair_hash)
     if cached is not None:
         return cached, True
 
-    user_prompt = _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" + _fact_block("FACT B", fact_b, doc_b_name)
     raw = chat_json(REASONING_MODEL, SYSTEM_PROMPT_METRIC, user_prompt, temperature=0.0,
                      max_tokens=250, timeout=REASONING_TIMEOUT_SECONDS)
     result = _validated(MetricMatch, raw, default={"same_metric": False,
@@ -282,21 +327,25 @@ def classify_relation(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: s
                        comparison_line: str) -> tuple[dict, bool]:
     """Step 2: given the two facts already share a metric, and given a
     deterministic normalized-value comparison computed in code (not by the
-    model), decide corroborates / contradicts / reconciled / unrelated.
-    The comparison line is part of the cache key so a normalize.py bugfix
-    that changes the computed comparison can't silently serve a stale
-    judgment made under the old (wrong) comparison."""
-    pair_hash = hash_text(REASONING_MODEL, "step2_judge", SYSTEM_PROMPT_JUDGE,
-                           hash_fact_pair(fact_a, fact_b), comparison_line)
-    cached = db.get_cached_relationship(pair_hash)
-    if cached is not None:
-        return cached, True
+    model), PROPOSE corroborates / contradicts / reconciled / unrelated /
+    uncertain. This proposal is not the final answer -- see classify_pair,
+    which runs it through app/adjudication.py's deterministic checks before
+    anything is stored.
 
+    comparison_line is part of the rendered prompt (and therefore the cache
+    key, same reasoning as classify_metric_match above), so a normalize.py
+    bugfix that changes the computed comparison can't silently serve a
+    stale judgment made under the old (wrong) comparison."""
     user_prompt = (
         _fact_block("FACT A", fact_a, doc_a_name) + "\n\n" +
         _fact_block("FACT B", fact_b, doc_b_name) + "\n\n" +
         comparison_line
     )
+    pair_hash = hash_text(REASONING_MODEL, "step2_judge", SYSTEM_PROMPT_JUDGE, user_prompt)
+    cached = db.get_cached_relationship(pair_hash)
+    if cached is not None:
+        return cached, True
+
     raw = chat_json(REASONING_MODEL, SYSTEM_PROMPT_JUDGE, user_prompt, temperature=0.0,
                      max_tokens=400, timeout=REASONING_TIMEOUT_SECONDS)
     result = _validated(RelationJudgment, raw, default={
@@ -344,6 +393,11 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
             "explanation": metric_result.get("reason") or "The two facts do not describe the same underlying metric.",
             "reconciliation_context": None,
             "confidence": metric_result.get("confidence"),
+            "decision_source": None, "llm_proposal": None,
+            "disagreement": False, "disagreement_reason": None,
+            "adjudication_checks": {
+                "slice_a": metric_result.get("slice_a"), "slice_b": metric_result.get("slice_b"),
+            },
             "_meta": {"steps_run": 1, "llm_calls": 0 if metric_cached else 1,
                        "same_metric": False, "swapped": swapped},
         }
@@ -387,7 +441,34 @@ def classify_pair(fact_a: dict, doc_a_name: str, fact_b: dict, doc_b_name: str) 
     comparison_line = "\n".join(comparison_lines)
     judge_result, judge_cached = classify_relation(fact_a, doc_a_name, fact_b, doc_b_name, comparison_line)
 
-    result = dict(judge_result)
+    # Both facts have a numeric dimension at all -- distinguishes "the two
+    # numbers can't be reduced to a common unit" (a structural fact, see
+    # adjudication rule 1) from "at least one fact isn't a number to begin
+    # with" (a qualitative claim, left to the model). comparison.comparable
+    # alone can't tell these apart: both show up as comparable=False.
+    both_numeric = fact_a.get("value_numeric") is not None and fact_b.get("value_numeric") is not None
+
+    # The model's step-2 answer is a PROPOSAL, not the final word: it gets
+    # checked here against the same deterministic facts the prompt above
+    # was built from, and overridden wherever they're conclusive. See
+    # app/adjudication.py for the full precedence and why one of its
+    # overrides is deliberately bold.
+    adjudication = adjudicate(
+        judge_result, comparison, period, scope, evidence_caveat, both_numeric,
+        slice_a=metric_result.get("slice_a"), slice_b=metric_result.get("slice_b"),
+    )
+
+    result = {
+        "relation_type": adjudication.relation_type,
+        "explanation": adjudication.explanation,
+        "reconciliation_context": adjudication.reconciliation_context,
+        "confidence": adjudication.confidence,
+        "decision_source": adjudication.decision_source,
+        "llm_proposal": adjudication.llm_proposal,
+        "disagreement": adjudication.disagreement,
+        "disagreement_reason": adjudication.disagreement_reason,
+        "adjudication_checks": adjudication.checks,
+    }
     result["_meta"] = {
         "steps_run": 2,
         "llm_calls": (0 if metric_cached else 1) + (0 if judge_cached else 1),
@@ -406,13 +487,18 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
     new facts in this same batch (so within-document tensions like
     standalone-vs-consolidated numbers in one filing are still caught).
 
-    Candidate shortlisting (cheap, local, numpy) and the DB reads/writes
-    all happen on the main thread; only the actual LLM calls -- the slow,
-    independent part -- run in a bounded thread pool (LLM_CONCURRENCY),
-    which keeps SQLite access single-threaded and simple (see app/db.py)
-    while still letting slow network calls overlap when the hardware
-    supports it. Returns a summary dict used both for the API response and
-    for the per-document performance report (see app/pipeline.py)."""
+    Candidate shortlisting (cheap, local, numpy) and job-list building
+    happen on the main thread before any LLM call starts; the LLM calls
+    themselves -- the slow, independent part -- run in a bounded thread
+    pool (LLM_CONCURRENCY). Each worker thread's classify_pair call also
+    reads and writes the relationship cache (app/db.py) via its own SQLite
+    connection as part of that same call -- safe under SQLite's
+    busy-timeout (see get_conn), but not literally single-threaded database
+    access, despite what an earlier version of this docstring claimed.
+    Final relationship INSERTs are deferred and happen back on the main
+    thread, in the loop below, after every future has resolved. Returns a
+    summary dict used both for the API response and for the per-document
+    performance report (see app/pipeline.py)."""
     t0 = time.perf_counter()
     prior_pool = db.get_all_embeddings(exclude_document_id=document_id)
     new_facts = [db.get_fact(fid) for fid in new_fact_ids]
@@ -483,6 +569,12 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
         "llm_calls": 0, "cache_hits": 0,
         "metric_mismatches": 0,  # step 1 said "no" -- resolved without ever reaching step 2
         "uncertain": 0,          # judged, but the evidence did not settle it
+        "related_but_not_comparable": 0,  # same metric, but units can't be reduced to a common base
+        "insufficient_context": 0,        # values differ, but period/scope didn't establish why
+        # A pair where app/adjudication.py's deterministic checks disagreed
+        # with the model's own step-2 proposal -- the system catching its
+        # own LLM, counted rather than just individually inspectable.
+        "llm_overridden": 0,
         # Pairs no embedding threshold would have surfaced, promoted by an
         # entity/lexical/numeric signal instead (see app/candidates.py).
         "hybrid_promotions": hybrid_promotions,
@@ -567,6 +659,12 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             continue
         if relation == "uncertain":
             summary["uncertain"] += 1
+        elif relation == "related_but_not_comparable":
+            summary["related_but_not_comparable"] += 1
+        elif relation == "insufficient_context":
+            summary["insufficient_context"] += 1
+        if result.get("disagreement"):
+            summary["llm_overridden"] += 1
 
         # Persist in the same order the explanation talks about, so the
         # UI's left-hand fact is the one the text calls "FACT A".
@@ -578,6 +676,11 @@ def build_relationships_for_document(document_id: int, new_fact_ids: list[int]) 
             result.get("confidence"),
             score,
             reason.describe(),
+            decision_source=result.get("decision_source"),
+            llm_proposal=result.get("llm_proposal"),
+            disagreement=bool(result.get("disagreement")),
+            disagreement_reason=result.get("disagreement_reason"),
+            adjudication_checks=result.get("adjudication_checks"),
         )
         summary["stored"] += 1
 

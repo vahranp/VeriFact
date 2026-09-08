@@ -121,6 +121,61 @@ _CURRENCY_ALIASES = {
 }
 
 
+# A parenthesized accounting negative: "(452)", "(6.3%)" -- the number can
+# sit before a trailing '%' and then the closing paren, so this can't just
+# look for a digit immediately followed by ')'.
+_PAREN_NUMBER = re.compile(r"\(\s*-?\d[\d.,]*\d?\s*%?\s*\)")
+# A full number token under either separator convention: a run of
+# digit/dot/comma characters that starts and ends on a digit. Anchoring
+# both ends on \d (rather than a greedy [\d,]*\.?\d+, which stops at the
+# first dot) is what keeps a European multi-group number like "12.345.678"
+# from being truncated to "12.345".
+_PLAIN_NUMBER = re.compile(r"-?\d[\d.,]*\d?")
+
+
+def extract_number_tokens(text) -> list[float]:
+    """Finds every number-shaped token in free text and parses each with
+    parse_locale_number, returning actual numeric values -- not digit
+    strings. This is what makes a numeric comparison check whether a value
+    appears as its OWN token, rather than whether its digits occur
+    somewhere inside a longer run: naive digit-string matching lets
+    value=12 "match" a quote containing "2024" and "120" (since "12" is a
+    substring of "2024120"), and lets value=12.5 match an unrelated "3125"
+    (since stripping the decimal point turns 12.5 into "125", which is a
+    substring of "3125"). Token-level parsing treats 12, 12.5, 120 and 2024
+    as the distinct numbers they are.
+
+    A parenthesized token ("(452)") is read as its negative, matching
+    accounting convention; the digits inside it are not also emitted as a
+    second, positive token. Order in the returned list is
+    parenthesized-tokens-first, then plain tokens in the order they appear
+    -- callers that want "the" number in a short value string (e.g. a
+    fallback when a model left value_numeric null) can take the first
+    element, preferring an accounting negative over a coincidental plain
+    number elsewhere in the same string.
+    """
+    if not text:
+        return []
+    s = str(text)
+    tokens: list[float] = []
+    consumed = bytearray(len(s))
+    for m in _PAREN_NUMBER.finditer(s):
+        inner = _PLAIN_NUMBER.search(m.group(0))
+        if inner:
+            parsed = parse_locale_number(inner.group(0))
+            if parsed is not None:
+                tokens.append(-abs(parsed))
+        for i in range(m.start(), m.end()):
+            consumed[i] = 1
+    for m in _PLAIN_NUMBER.finditer(s):
+        if any(consumed[m.start():m.end()]):
+            continue
+        parsed = parse_locale_number(m.group(0))
+        if parsed is not None:
+            tokens.append(parsed)
+    return tokens
+
+
 @dataclass
 class Normalized:
     value: float

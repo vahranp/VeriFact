@@ -150,7 +150,7 @@ def process_document(document_id: int, pdf_path: str, max_pages: int | None = No
         with sw.track("fact_extraction"):
             with ThreadPoolExecutor(max_workers=max(1, LLM_CONCURRENCY)) as pool:
                 future_to_idx = {
-                    pool.submit(extract_facts_from_chunk, c, document_name): i
+                    pool.submit(extract_facts_from_chunk, c): i
                     for i, c in enumerate(chunks)
                 }
                 done_count = 0

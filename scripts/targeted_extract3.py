@@ -19,7 +19,7 @@ print(window.encode("ascii", "replace").decode())
 
 chunk = Chunk(page_number=22, text=window)
 t0 = time.perf_counter()
-facts, issues, cache_hit = extract_facts_from_chunk(chunk, "targeted-test-3")
+facts, issues, cache_hit = extract_facts_from_chunk(chunk)
 dt = time.perf_counter() - t0
 print(f"\nduration: {dt:.1f}s  cache_hit={cache_hit}")
 print(f"facts: {len(facts)}  issues: {len(issues)}")

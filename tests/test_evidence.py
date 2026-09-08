@@ -90,6 +90,40 @@ class TestValueMustAppearInItsQuote:
         assert check.status == QUOTE_GROUNDED
 
 
+class TestTokenLevelMatchingNotDigitSubstring:
+    """Regression tests for a real false-positive class: an earlier version
+    of this check projected both the quote and the value to digit-only
+    strings and did a substring test, which is far weaker than it looks --
+    "12" is a substring of "2024120", and stripping the decimal point out
+    of "12.5" leaves "125", a substring of an unrelated "3125"."""
+
+    def test_a_short_value_does_not_match_by_appearing_inside_longer_numbers(self):
+        check = check_evidence(
+            _fact(quote="Revenue for 2024 was 120 crore", value="12", value_numeric=12.0),
+            quote_grounded=True,
+        )
+        assert check.value_supported is False
+
+    def test_a_decimal_value_does_not_match_an_unrelated_reference_number(self):
+        check = check_evidence(
+            _fact(quote="the reference number is 3125 for this filing",
+                  value="12.5", value_numeric=12.5),
+            quote_grounded=True,
+        )
+        assert check.value_supported is False
+
+    def test_the_correct_value_among_several_quote_numbers_still_matches(self):
+        """A quote can legitimately contain more than one number (a year
+        alongside the actual figure); matching must find the right one,
+        not merely tolerate the others being present."""
+        check = check_evidence(
+            _fact(quote="In 2024 the total reached 1,204 units",
+                  value="1,204", value_numeric=1204.0),
+            quote_grounded=True,
+        )
+        assert check.value_supported is True
+
+
 class TestQualitativeFacts:
     def test_a_fact_with_no_number_has_nothing_numeric_to_verify(self):
         """Absence of a number is not a verification failure."""

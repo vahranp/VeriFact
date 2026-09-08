@@ -13,9 +13,10 @@ from app.priority import (
 )
 
 
-def _rel(rel_id, a, b, relation, confidence=0.9):
+def _rel(rel_id, a, b, relation, confidence=0.9, disagreement=False, llm_proposal=None):
     return {"id": rel_id, "fact_id_a": a, "fact_id_b": b,
-            "relation_type": relation, "confidence": confidence}
+            "relation_type": relation, "confidence": confidence,
+            "disagreement": disagreement, "llm_proposal": llm_proposal}
 
 
 def _fact(fact_id, document_id=1, evidence_status=None):
@@ -51,6 +52,35 @@ class TestRelationshipPriority:
     def test_reasons_are_never_empty(self):
         score = score_relationship(_rel(1, 10, 20, "reconciled"), set())
         assert score.reasons
+
+    def test_related_but_not_comparable_is_low_priority(self):
+        score = score_relationship(_rel(1, 10, 20, "related_but_not_comparable"), set())
+        assert score.level == LOW
+
+    def test_insufficient_context_outranks_reconciled_but_not_uncertain(self):
+        reconciled = score_relationship(_rel(1, 10, 20, "reconciled"), set())
+        insufficient = score_relationship(_rel(2, 10, 20, "insufficient_context"), set())
+        uncertain = score_relationship(_rel(3, 10, 20, "uncertain"), set())
+        assert reconciled.score < insufficient.score < uncertain.score
+
+    def test_a_disagreement_always_reaches_at_least_high_priority(self):
+        """The system overriding its own model is exactly what a reviewer
+        should see first, regardless of how mundane the final label is."""
+        score = score_relationship(
+            _rel(1, 10, 20, "reconciled", disagreement=True, llm_proposal="contradicts"), set(),
+        )
+        assert score.level == HIGH
+        assert any("overrode" in r for r in score.reasons)
+
+    def test_a_disagreement_names_the_overridden_proposal(self):
+        score = score_relationship(
+            _rel(1, 10, 20, "corroborates", disagreement=True, llm_proposal="contradicts"), set(),
+        )
+        assert any("contradicts" in r for r in score.reasons)
+
+    def test_no_disagreement_does_not_add_the_override_reason(self):
+        score = score_relationship(_rel(1, 10, 20, "corroborates", disagreement=False), set())
+        assert not any("overrode" in r for r in score.reasons)
 
 
 class TestFactPriority:

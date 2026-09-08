@@ -171,6 +171,18 @@ class TestPipelineFingerprintInvalidation:
         monkeypatch.setattr(config, "PIPELINE_VERSION", "999")
         assert config.pipeline_fingerprint() != before
 
+    def test_an_extraction_prompt_change_changes_the_fingerprint(self, monkeypatch):
+        """Regression test for a real gap: the document-level dedup
+        short-circuit (find_done_document_by_hash) used to keep serving a
+        byte-identical re-upload's OLD facts after the extraction prompt
+        changed, because the fingerprint hashed the model name but not the
+        prompt text itself -- even though the chunk-level cache already
+        correctly included the prompt in its own key."""
+        from app import config, fact_extraction
+        before = config.pipeline_fingerprint()
+        monkeypatch.setattr(fact_extraction, "SYSTEM_PROMPT", fact_extraction.SYSTEM_PROMPT + " extra instruction")
+        assert config.pipeline_fingerprint() != before
+
     def test_unrelated_config_does_not_change_the_fingerprint(self, monkeypatch):
         """A timeout or concurrency edit must not force re-ingestion of
         every document -- those don't change what gets extracted."""

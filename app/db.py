@@ -144,6 +144,27 @@ def init_db():
         # request_cancel below for why, and app/pipeline.py /
         # app/relationships.py for where it's actually checked.
         _ensure_column(conn, "documents", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+        # Deterministic adjudication trace (see app/adjudication.py).
+        # decision_source: deterministic_confirmed | deterministic_override
+        # | llm_unchecked -- whether a computed check ran at all, and
+        # whether it agreed with or overrode the model's own proposal.
+        # llm_proposal/disagreement_reason are null when no override
+        # applies (confirmed, or nothing to check against). adjudication_json
+        # carries the full structured trace (comparison/period/scope
+        # verdicts) for inspection -- existing rows created before this
+        # column existed are simply null, not backfilled.
+        _ensure_column(conn, "relationships", "decision_source", "TEXT")
+        _ensure_column(conn, "relationships", "llm_proposal", "TEXT")
+        _ensure_column(conn, "relationships", "disagreement", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "relationships", "disagreement_reason", "TEXT")
+        _ensure_column(conn, "relationships", "adjudication_json", "TEXT")
+        # Table-reconstruction risk signal (see app/tables.py,
+        # app/pdf_extract.py): "reconstructed" | "plain_not_tabular" |
+        # "plain_reconstruction_rejected" -- the last means the page looked
+        # tabular but reconstruction was rejected, so the model saw the
+        # same flattened-grid text that originally caused row-label
+        # extraction errors, with no structural help.
+        _ensure_column(conn, "facts", "table_context", "TEXT")
 
 
 # A job is declared orphaned by STALENESS, not by process identity.
@@ -320,6 +341,28 @@ def is_cancel_requested(document_id: int) -> bool:
         return bool(row and row["cancel_requested"])
 
 
+def resolve_document_id(document_id: Optional[int]) -> Optional[int]:
+    """A reused (byte-identical-content) document stores no facts of its
+    own -- see find_done_document_by_hash and the upload dedup short-
+    circuit in app/main.py -- so any endpoint that scopes a query by
+    document_id must read through reused_from_document_id first, or it
+    silently sees zero facts for a document the UI reports as 'done'.
+    get_document/list_documents already did this inline; this centralizes
+    it so every other document_id-scoped lookup (facts, priority,
+    timelines) does the same thing rather than each reimplementing it
+    (or, as happened before this existed, forgetting to).
+
+    None in, None out -- callers that treat "no document_id filter" and
+    "resolve this document_id" as the same code path don't need a special
+    case."""
+    if document_id is None:
+        return None
+    doc = get_document(document_id)
+    if doc is None:
+        return document_id
+    return doc.get("reused_from_document_id") or document_id
+
+
 def get_document(document_id: int) -> Optional[dict]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
@@ -340,8 +383,8 @@ def insert_fact(document_id: int, page_number: int, fact: dict, embedding: list[
             """INSERT INTO facts
                (document_id, page_number, subject, attribute, value, value_numeric, unit,
                 time_period, scope, statement, quote, quote_grounded, confidence,
-                evidence_status, evidence_detail, embedding_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                evidence_status, evidence_detail, table_context, embedding_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 document_id, page_number,
                 fact.get("subject"), fact.get("attribute"), fact.get("value"),
@@ -350,6 +393,7 @@ def insert_fact(document_id: int, page_number: int, fact: dict, embedding: list[
                 1 if fact.get("quote_grounded", True) else 0,
                 fact.get("confidence"),
                 fact.get("evidence_status"), fact.get("evidence_detail"),
+                fact.get("table_context"),
                 json.dumps(embedding), time.time(),
             ),
         )
@@ -391,15 +435,22 @@ def get_all_embeddings(exclude_document_id: Optional[int] = None) -> list[tuple[
 
 def insert_relationship(fact_id_a: int, fact_id_b: int, relation_type: str, explanation: str,
                          reconciliation_context: Optional[str], confidence: Optional[float],
-                         similarity_score: float, candidate_reason: Optional[str] = None) -> int:
+                         similarity_score: float, candidate_reason: Optional[str] = None,
+                         decision_source: Optional[str] = None, llm_proposal: Optional[str] = None,
+                         disagreement: bool = False, disagreement_reason: Optional[str] = None,
+                         adjudication_checks: Optional[dict] = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO relationships
                (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-                confidence, similarity_score, candidate_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, similarity_score, candidate_reason, decision_source, llm_proposal,
+                disagreement, disagreement_reason, adjudication_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (fact_id_a, fact_id_b, relation_type, explanation, reconciliation_context,
-             confidence, similarity_score, candidate_reason, time.time()),
+             confidence, similarity_score, candidate_reason, decision_source, llm_proposal,
+             1 if disagreement else 0, disagreement_reason,
+             json.dumps(adjudication_checks) if adjudication_checks is not None else None,
+             time.time()),
         )
         return cur.lastrowid
 

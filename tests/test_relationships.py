@@ -281,13 +281,16 @@ class TestModelOutputIsValidated:
         })
         assert R.classify_pair(_f("a"), "d", _f("b"), "d")[0]["relation_type"] == "contradicts"
 
-    def test_out_of_range_confidence_is_clamped(self, no_cache, monkeypatch):
+    def test_out_of_range_confidence_becomes_none_not_a_false_maximum(self, no_cache, monkeypatch):
+        """A confidence of 7.5 is a model error, not evidence of maximum
+        confidence -- clamping it to 1.0 would display as MORE certain
+        than a well-behaved 0.9 response, which is backwards."""
         import app.relationships as R
         monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
             "same_metric": True, "relation_type": "corroborates",
             "explanation": "x", "confidence": 7.5,
         })
-        assert R.classify_pair(_f("a"), "d", _f("b"), "d")[0]["confidence"] == 1.0
+        assert R.classify_pair(_f("a"), "d", _f("b"), "d")[0]["confidence"] is None
 
     def test_a_list_response_cannot_crash_the_pair(self, no_cache, monkeypatch):
         """A malformed response that recovers to a list used to reach
@@ -377,6 +380,81 @@ class TestContextReachesTheJudge:
         b = dict(_f("b"), time_period="FY2023-24")
         result, _ = R.classify_pair(a, "d", b, "d")
         assert result["_meta"]["period"] == "same"
+
+
+class TestDeterministicAdjudicationIsWiredIn:
+    """Integration-level checks that classify_pair actually runs its
+    output through app/adjudication.py rather than trusting the model's
+    step-2 answer outright -- the unit tests for the adjudication rules
+    themselves live in tests/test_adjudication.py."""
+
+    def test_a_wrong_llm_proposal_is_overridden_end_to_end(self, no_cache, monkeypatch):
+        """The model insists these contradict; the values agree to
+        0.006% for the same period. The final answer must not be the
+        model's -- exactly the failure app/adjudication.py exists to catch."""
+        import app.relationships as R
+
+        def fake(model, system, user, **kw):
+            if "same_metric" in system:
+                return {"same_metric": True, "reason": "both state revenue"}
+            return {"relation_type": "contradicts", "explanation": "the numbers just differ",
+                    "confidence": 0.95}
+
+        monkeypatch.setattr(R, "chat_json", fake)
+        result, _ = R.classify_pair(
+            _fact(value_numeric=8142.0, unit="INR Crore", time_period="FY24"), "a.pdf",
+            _fact(value_numeric=81415.38, unit="INR million", time_period="FY2023-24"), "b.pdf",
+        )
+        assert result["relation_type"] == "corroborates"
+        assert result["decision_source"] == "deterministic_override"
+        assert result["disagreement"] is True
+        assert result["llm_proposal"] == "contradicts"
+        assert result["disagreement_reason"]
+
+    def test_an_agreeing_llm_proposal_is_confirmed_not_silently_replaced(self, no_cache, calls):
+        result, _ = relationships.classify_pair(
+            _fact(value_numeric=8142.0, unit="INR Crore"), "a.pdf",
+            _fact(value_numeric=81415.38, unit="INR million"), "b.pdf",
+        )
+        assert result["decision_source"] == "deterministic_confirmed"
+        assert result["disagreement"] is False
+        assert result["llm_proposal"] == "corroborates"
+
+    def test_qualitative_facts_are_unchecked_not_forced(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": True, "relation_type": "corroborates",
+            "explanation": "both assert resignation", "confidence": 0.8,
+        })
+        result, _ = R.classify_pair(
+            _fact(value_numeric=None, unit=None, attribute="director status"), "a.pdf",
+            _fact(value_numeric=None, unit=None, attribute="director status"), "b.pdf",
+        )
+        assert result["decision_source"] == "llm_unchecked"
+        assert result["disagreement"] is False
+
+    def test_the_unrelated_early_return_carries_the_same_field_shape(self, no_cache, monkeypatch):
+        """Callers should be able to rely on these keys existing regardless
+        of which path produced the result."""
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda *a, **k: {
+            "same_metric": False, "reason": "different measures",
+        })
+        result, _ = R.classify_pair(_fact(), "a.pdf", _fact(attribute="headcount"), "b.pdf")
+        for key in ("decision_source", "llm_proposal", "disagreement", "disagreement_reason", "adjudication_checks"):
+            assert key in result
+
+    def test_incompatible_units_become_related_but_not_comparable(self, no_cache, monkeypatch):
+        import app.relationships as R
+        monkeypatch.setattr(R, "chat_json", lambda model, system, user, **k: (
+            {"same_metric": True, "reason": "both are figures"} if "same_metric" in system else
+            {"relation_type": "uncertain", "explanation": "not sure", "confidence": 0.5}
+        ))
+        result, _ = R.classify_pair(
+            _fact(value_numeric=5.6, unit="%"), "a.pdf",
+            _fact(value_numeric=404.0, unit="INR Crore"), "b.pdf",
+        )
+        assert result["relation_type"] == "related_but_not_comparable"
 
 
 class TestUnverifiedEvidenceCaveat:
