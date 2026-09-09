@@ -328,30 +328,50 @@ producing a spurious `reconciled` (different-period) result instead of the real 
 Fixed to match on the VALUE itself within a tight numeric tolerance, and to prefer facts from
 successfully completed documents.
 
-### Case 2 — Genuine contradiction, as far as the current data allows
+### Case 2 — A genuine numeric disagreement, and a live LLM-vs-system override
 
 ```
-net_worth:    doc=26 id=355 value_numeric=85466.74 unit=INR million
-total_equity: doc=12 id=174 value_numeric=91446.46 unit=INR
+net_worth:    doc=26 id=355 value_numeric=85466.74 unit=INR million period=FY24 scope=None
+total_equity: doc=12 id=174 value_numeric=91446.46 unit=INR million period=FY24 scope=None
 
-relation_type: uncertain
+relation_type: insufficient_context
 confidence: 1.0
-decision_source: deterministic_confirmed
-llm_proposal: uncertain
+decision_source: deterministic_override
+llm_proposal: contradicts
+disagreement: True -- values differ by 6.539%, but at least one fact does not state a
+scope -- not enough context to tell a contradiction from a reconciliation
 ```
 
-The stored total-equity fact carries an incomplete unit (`"INR"`, missing "million") from a
-specific, pre-existing extraction on this page — a real data condition, not a new bug, and already
-documented before this pass. `compare_values` flags the ~1,000,000× gap as `magnitude_suspect`;
-`app/adjudication.py`'s rule 2 caps ANY proposal at `uncertain` in that case, which is exactly what
-both the model and the deterministic layer converge on here — `decision_source=
-deterministic_confirmed` shows the two agreeing, not the deterministic layer merely failing to
-object. Reporting a confident contradiction off a comparison wrong by a factor of a million would
-be the right label for the wrong reason; `uncertain` is the honest answer. A one-off fix to this
-specific page's unit (re-ingesting until the extraction happens to come out clean) was deliberately
-not chased — see §13. Genuine, undisputed contradictions exist elsewhere in the Delhivery corpus
-(30 at last audit, including two transposed director DIN identifiers found with no rule about
-director tables anywhere).
+The stored total-equity fact originally carried two real extraction gaps: unit `"INR"` (missing
+"million") and no `time_period`. Both were corrected as a one-time, *verified* fix, not a guess --
+the balance sheet's own page header states "(All amounts in Indian Rupees in million, unless
+otherwise stated)", and the figure's column is headed "As at March 31, 2024". This is the one
+place in this whole pass where a specific fact's stored metadata was directly corrected rather than
+left as a documented artifact -- done deliberately, on request, after confirming by direct
+computation (`app.normalize.compare_values`, `app.context.compare_periods/compare_scopes`) that no
+naturally-occurring real fact pair in this corpus satisfies `app/adjudication.py` rule 5's
+requirement of a *positively confirmed* matching scope (every real numeric pair either has no
+scope stated on at least one side, or the pairs already labelled `contradicts` in the DB turn out,
+on inspection, to be the table-column-misattribution bug documented under Case 4 -- the same
+current-year/prior-year column landing on both sides under one mislabelled period, not an
+independent business contradiction).
+
+With the unit fixed, `compare_values` reports a real 6.539% difference -- no longer
+magnitude-suspect -- at a confirmed SAME period. The model, given that computed comparison,
+confidently proposed `contradicts`. The deterministic layer did not confirm it: rule 5 requires
+scope to be positively confirmed the same, and neither source states one, so `insufficient_context`
+is what the adjudicator can actually back up (`decision_source=deterministic_override`,
+`disagreement=True`). This is a genuine, live instance of the signature feature -- a confident LLM
+proposal, overridden -- reproduced with a hard `assert` in `scripts/test_case2.py`, not merely
+printed. Whether "net worth" (BRSR, per SEBI's disclosure convention) and "total equity" (Ind-AS,
+Consolidated Balance Sheet) are even reported on the same basis for this company is a real open
+question this pass did not chase further (re-extracting the net-worth page to see whether it ever
+states a scope would be the next step, and is exactly the kind of one-off, document-specific
+follow-up §13 already reasons about not chasing). Genuine, undisputed contradictions do exist
+elsewhere in the Delhivery corpus (30 at last audit, including two transposed director DIN
+identifiers found with no rule about director tables anywhere) -- though on inspection, several of
+those 30 turn out to be instances of the same column-misattribution bug as Case 4, not independent
+business contradictions; that count is reported as what it actually is rather than left inflated.
 
 ### Case 3 — Apparent contradiction reconciled by context
 
@@ -405,8 +425,8 @@ Delhivery-specific quirk.
 
 **4b — graph coherence proving a logical inconsistency:**
 ```
-278 facts, 401 relationships, 223 closed triangles: 26 logically impossible (11.7%),
-65 edges implicated, 145 edges inferable by transitivity
+287 facts, 407 relationships, 223 closed triangles: 26 logically impossible (11.7%),
+65 edges implicated, 148 edges inferable by transitivity
 
 facts (49, 152, 263): corroborates + corroborates + reconciled cannot all hold
 (logically impossible under the model's own equality judgments).
@@ -452,8 +472,11 @@ generalization run's real timings are in PERFORMANCE.md's own section once the l
 ## 12. Remaining limitations
 
 Carried over from before this pass, still true, not re-litigated: the 8B local model remains the
-extraction/reasoning accuracy ceiling; precision is measured by self-consistency (coherence proofs,
-corpus re-audits), not hand-labelled ground truth; table reconstruction recovers rows and cells but
+extraction/reasoning accuracy ceiling; corpus-wide precision is still measured by self-consistency
+(coherence proofs, corpus re-audits), not a hand-labelled pass over the full corpus -- a real,
+independently-labelled benchmark sample now exists (§15) with actual measured precision/recall/F1,
+but at benchmark scale (38 relationship cases, 35 evidence cases), not corpus scale (401
+relationships); table reconstruction recovers rows and cells but
 not header semantics, so a value's column meaning still depends on the model correctly reading an
 aligned header row; relative periods ("previous year") can't resolve without each document's own
 extracted reporting date; candidate retrieval is a linear scan appropriate at this scale, not at
@@ -487,10 +510,12 @@ a catch-all.
   (`scripts/bench_candidates.py`): 3 pairs of recall for 3× the LLM calls. Re-litigating a measured
   decision without new evidence would violate this project's own "optimize only what's measured"
   rule; only the documentation's overclaim about how far the hybrid signals reach was fixed.
-- **A hand-labelled precision benchmark, a vector index, a durable job queue, OCR, multi-agent
-  orchestration.** All out of scope per the brief's own anti-overengineering instruction and this
-  project's existing, already-honest limitations list — none of these are new omissions introduced
-  by this pass.
+- **A vector index, a durable job queue, OCR, multi-agent orchestration.** All out of scope per the
+  brief's own anti-overengineering instruction and this project's existing, already-honest
+  limitations list — none of these are new omissions introduced by this pass. (A hand-labelled
+  precision benchmark was in this bullet at the time this section was written; §15 records that one
+  was later built, at benchmark scale rather than full-corpus scale — removed from here rather than
+  left inaccurate.)
 - **A fabricated multi-dimensional numeric confidence score** (e.g. a made-up `context_confidence:
   0.73`). The adjudication `checks` trace (categorical: which rule fired, what each computed
   verdict was) serves the same "don't collapse uncertainty into one number" goal without inventing
@@ -579,3 +604,47 @@ as a formally pre-registered train/freeze split (the existing held-out run is re
 relabelling its methodology after the fact would not make it more true, only more elaborately
 described -- `evaluation/README.md` states plainly that no formal freeze protocol was pre-registered,
 rather than implying one was).
+
+## 16. A final submission audit: correctness and documentation only, no new architecture
+
+A last pass asked for exactly what its own framing said: find and remove stale claims, make the
+docs match the code exactly, and fix Case 2 -- not build anything new. What changed:
+
+- **Stale "hand-labelled benchmark not implemented" claims, removed.** §13 and README's
+  "intentionally not implemented" list both still said this after §15 built one. Fixed in both
+  places, with a note on what's still genuinely true: the benchmark is sample-scale (38 relationship
+  cases, 35 evidence cases), not a hand-labelled pass over the full 401-relationship corpus.
+- **A real setup bug, found and fixed.** README's clone instructions said `cd superjoin-fact-layer`
+  -- the local directory name, not `VeriFact`, which is what `git clone
+  https://github.com/vahranp/VeriFact.git` actually produces. Anyone following the instructions
+  literally would have hit "no such directory" on step 1.
+- **The "three Delhivery documents" claim was checked, not assumed, and found to overclaim.**
+  `git ls-files`/the live `documents` table were checked directly: the 2022 IPO prospectus (present
+  on disk in the starter dataset) was never actually ingested this session. Fixed to say what was
+  actually run -- the annual report and the Q4 deck -- rather than implying all three were.
+- **The 78.9% relationship-benchmark figure was made explicit about its own scope.** It already sat
+  next to "(38 cases)," but a direct sentence was added: this is the regression benchmark's result,
+  not a universal accuracy claim, precisely because the benchmark is deliberately stocked with named
+  failure modes rather than a random sample of everyday relationships.
+- **Case 2, rebuilt on verified real data with a hard assertion (see §15's benchmark for how the
+  search was conducted).** Before this: `scripts/test_case2.py` printed a result with no `assert` at
+  all, and that result (`uncertain`, from a real unit bug) was correct but not what "genuine
+  contradiction" was asking for. Investigated exhaustively whether a naturally-occurring real fact
+  pair in the corpus could satisfy adjudication rule 5 (a confirmed CONTRADICTS, which requires
+  scope positively confirmed the same, not merely absent on both sides) -- none does; every
+  same-metric numeric pair either lacks a stated scope on at least one side, or is one of the 30
+  already-labelled `contradicts` rows, which on inspection are the Case-4 table-column-misattribution
+  bug wearing a different line item, not an independent business contradiction. Asked the user how
+  to proceed rather than silently pick an approach for them; the chosen path was to correct exactly
+  two verified metadata gaps on the total-equity fact (unit and period, both stated in words on the
+  source page, neither invented) and accept the real, resulting, fully-deterministic answer:
+  `insufficient_context`, with the model having confidently proposed `contradicts` and the system
+  overriding it -- a live, reproducible instance of the disagreement feature, now locked in with a
+  hard `assert` instead of printed and left for a human to eyeball.
+- **Full suite and the evaluation benchmark re-run after every change**, not assumed still passing.
+
+Declined, same reasoning as always: reworking adjudication rule 5 so an *unstated* scope could
+count as "confirmed same" would manufacture exactly the "stated-but-unverifiable assumption
+substituted for a fact neither document asserts" this project exists to avoid -- the honest fix was
+correcting two real, verifiable metadata gaps and accepting the answer that produces, not loosening
+the rule until it agrees with a label chosen in advance.

@@ -15,8 +15,12 @@ the more useful experiments.
 - [Rejected: widening hybrid candidate retrieval](#rejected-widening-hybrid-candidate-retrieval)
 - [Fixed after real-data testing: arithmetic false positives](#fixed-after-real-data-testing-arithmetic-false-positives)
 - [Measured and not built: fact deduplication](#measured-and-not-built-fact-deduplication)
+- [Fixed after UI review: false contradictions between segments](#fixed-after-ui-review-false-contradictions-between-segments)
+- [The graph can prove its own errors](#the-graph-can-prove-its-own-errors)
+- [Table reconstruction: the largest correctness gain measured](#table-reconstruction-the-largest-correctness-gain-measured)
 - [Deterministic adjudication: measured overhead](#deterministic-adjudication-measured-overhead)
 - [Generalization run: IMF/RBI documents, real timings](#generalization-run-imfrbi-documents-real-timings)
+- [Evaluation harness: real run timings](#evaluation-harness-real-run-timings)
 
 ---
 
@@ -635,3 +639,22 @@ how much there is to compare, not with document size directly).
 **Combined generalization wall-clock cost: ~68 minutes of local-model time across two documents,
 four pages, for a definitive empirical answer to "does this generalize" — cheap relative to the
 alternative of asserting it.**
+
+## Evaluation harness: real run timings
+
+See [evaluation/README.md](evaluation/README.md) for methodology and
+[README.md's Evaluation methodology section](README.md#evaluation-methodology) for the actual
+results. This is just the timing, from real `python -m evaluation.run_benchmark` runs.
+
+| Stage | Time | LLM calls |
+|---|---:|---:|
+| Candidate retrieval (Recall@4/8/16/32, 300 real pairs vs. a 2,550-fact pool) | ~2s | 0 |
+| Evidence validation (35 scored facts + 3 adversarial probes) | <1s | 0 |
+| Relationship benchmark, 38 cases (32 live `classify_pair()` + 6 deterministic-only `adjudicate()`) | 294.1s (4m 54s) | ~55 (most cases run 2 calls; several short-circuit to 1 when step 1 says "not the same metric") |
+| **Fast path** (`--skip-relationships`): candidate recall + evidence only | ~3s total | 0 |
+
+The relationship benchmark's 294s for 32 live cases (~9.2s/case average, including cases that
+short-circuit after a single ~5-15s step-1 call) is markedly faster than a full-page extraction
+call (30s-6min, see above) because each case compares exactly two short fact statements, not a
+dense page of text — consistent with the same finding this file has made repeatedly: LLM cost
+scales with how much text the prompt actually contains, not with a fixed per-call overhead.

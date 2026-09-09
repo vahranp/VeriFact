@@ -6,10 +6,12 @@ other, which **contradict**, and which look like a contradiction but are actuall
 by different time periods, scope, or units. Built for the Superjoin VIT 2026 Engineering Intern
 assignment.
 
-Tested against the three Delhivery documents provided as the starter dataset (a 2022 IPO
-prospectus, the FY24 annual report, and the Q4 FY24 earnings deck), but nothing in the pipeline
-is specific to Delhivery, financial documents, or any fixed fact taxonomy — see [Approach](#approach)
-for how that's enforced.
+Tested against two of the three Delhivery documents provided as the starter dataset — the FY24
+annual report and the Q4 FY24 earnings deck — plus (see Generalization below) an IMF macroeconomic
+report and an RBI annual report the pipeline was never built with in mind. The third starter
+document, a 2022 IPO prospectus, was provided but not run through this pass. Nothing in the
+pipeline is specific to Delhivery, financial documents, or any fixed fact taxonomy — see
+[Approach](#approach) for how that's enforced.
 
 **Delhivery is a demonstration/test corpus, not a production dependency.** Production logic in
 `app/` does not depend on Delhivery-specific facts, filenames, pages, or schemas — stated
@@ -152,8 +154,9 @@ extra model call. Where a `corroborates` edge instead rests on the model's own q
 status" reading (two non-numeric facts, no number to check), the triangle is still strong evidence
 of an error, but calling it a mathematical proof would overstate what a same-status *judgment*
 establishes versus a same-*value* computation — `Violation.is_strict_proof` reports which case
-applies, rather than treating every violation the same way. On the live graph: 196 closed
-triangles, 25 logically impossible, 62 edges implicated, and 126 further edges deducible for free.
+applies, rather than treating every violation the same way. On the live graph (checked with
+`scripts/test_case4.py`, not a stale snapshot): 223 closed triangles, 26 logically impossible
+(11.7%), 65 edges implicated, and 148 further edges deducible for free.
 
 All three are instances of one principle: arithmetic, logic, and now direct numeric/context
 comparison, checking the model's work rather than trusting its report of having checked its own.
@@ -165,8 +168,8 @@ free, no API key) or an API key for an OpenAI-compatible provider (OpenRouter, O
 
 ```bash
 # 1. Clone and enter the repo
-git clone <this-repo-url>
-cd superjoin-fact-layer
+git clone https://github.com/vahranp/VeriFact.git
+cd VeriFact
 
 # 2. Create a virtual environment and install dependencies
 python -m venv venv
@@ -436,31 +439,48 @@ test is actually supposed to pin down anyway.
 
 ---
 
-**CASE 2 — Genuine contradiction, as far as the data currently allows.** Net worth (₹85,466.74M,
-sustainability report) against total equity (₹91,446.46M, balance sheet). For a company these name
-the same thing, and the ~₹6bn gap has no stated explanation.
+**CASE 2 — A genuine numeric disagreement, and the deterministic layer overriding a confident LLM
+mistake.** ✅ verified live, reproducible with a hard `assert` in `scripts/test_case2.py`
 
-The stored total-equity fact currently carries an incomplete unit (`"INR"` rather than `"INR
-million"`), a real, pre-existing extraction artifact on this specific ingested page. Fresh, live
-run against the current code:
+Net worth (₹85,466.74M, BRSR sustainability disclosure) against total equity (₹91,446.46M,
+Consolidated Balance Sheet). For a company these name the same underlying concept, and the 6.5%
+gap has no explanation stated in either source.
+
+The stored total-equity fact originally carried two real extraction gaps — unit stored as `"INR"`
+instead of `"INR million"`, and no `time_period` — both corrected as a one-time, *verified* fix:
+the balance sheet's own page header states "(All amounts in Indian Rupees in million, unless
+otherwise stated)", and the figure's own column is headed "As at March 31, 2024". Nothing about
+this fix is a guess; it copies two facts the source page already states in words into fields the
+original extraction didn't populate.
 
 | | |
 |---|---|
-| Result | **`uncertain`** |
-| `decision_source` | `deterministic_confirmed` — the model also proposed `uncertain`; `compare_values` independently flagged the ~1,000,000× gap as `magnitude_suspect` |
+| Result | **`insufficient_context`** |
+| `decision_source` | `deterministic_override` — **the model confidently proposed `contradicts`; the system overrode it** |
+| `disagreement` | `true` |
 
-**That is the correct behaviour, not a failure to detect.** `app/adjudication.py`'s rule 2 caps
-*any* proposal at `uncertain` when the comparison is magnitude-suspect, regardless of what the model
-says — reporting a contradiction off a comparison that is wrong by a factor of a million would be
-the right label for entirely the wrong reason, and it would hide a real extraction bug behind a
-plausible-looking finding. Re-ingesting this specific page to pick up a corrected unit is exactly
-the kind of one-off, document-specific fix this pass deliberately did not chase (see
+With the unit fixed, the comparison is no longer magnitude-suspect — it's a real, material 6.5%
+difference at the *same* reporting period (`period_relation: same`). The model looked at that and
+confidently proposed `contradicts`. But `app/adjudication.py`'s rule 5 (a *confirmed* contradiction)
+requires scope to be **positively confirmed the same** — not merely unstated on both sides — and
+neither the BRSR disclosure nor the balance sheet states whether "net worth" and "total equity"
+were computed on the same basis here (BRSR's own net-worth figure is not guaranteed to be computed
+identically to Ind-AS total equity, and nothing in the extracted text settles it either way).
+Rather than assert a conflict it cannot back up, the system overrides the model's confident answer
+to `insufficient_context`. This is the disagreement feature doing exactly its job: both opinions
+are stored, they differ, and the more cautious one — not the more confident one — is what's
+reported.
+
+Re-extracting the *net worth* page to see whether it ever states a scope is exactly the kind of
+one-off, document-specific chase this pass deliberately didn't take further (see
 [What was intentionally not implemented](FINAL_REVIEW.md)) — the fresh IMF/RBI generalization run
 below produces genuinely fresh contradiction/reconciliation examples on data this pass never
-touched. Genuine unexplained contradictions *are* found and stored elsewhere in the corpus — 30 in
-the Delhivery corpus, including two directors whose DIN identifiers are transposed between
+touched. Genuine unexplained contradictions *are* also found and stored elsewhere in the corpus —
+30 at last audit, including two directors whose DIN identifiers are transposed between
 extractions, found by comparing facts against each other with no rule about director tables
-anywhere.
+anywhere; several of those, on inspection, turn out to be the same table-column misattribution
+documented under Case 4 below, not independent business contradictions — labelled as what they
+actually are rather than left as an inflated count.
 
 ---
 
@@ -790,7 +810,8 @@ methodology, dataset provenance, and how to reproduce every number below:
 [`evaluation/README.md`](evaluation/README.md).
 
 **Development vs. held-out data.** Every prompt and threshold in `app/`
-was written against the three Delhivery documents. The IMF and RBI
+was written against the two Delhivery documents actually run through this pass (the annual report
+and the Q4 earnings deck — see the note at the top of this README on the IPO prospectus). The IMF and RBI
 documents used for [generalization](#generalization-proven-empirically-an-imf-article-iv-report-and-an-rbi-annual-report)
 above were never referenced by any code path and were ingested only after
 this pass's adjudication/evidence/context work was finished — a genuine,
@@ -860,6 +881,14 @@ directly with a synthetic LLM mistake, the same pattern
 | — corrected by the deterministic layer | 13 |
 | — still wrong after adjudication | 4 |
 | New errors introduced by an override | 0 |
+
+**78.9% is this 38-case regression benchmark's result, not a universal accuracy claim about
+VeriFact on arbitrary documents.** The benchmark is deliberately stocked with named failure modes
+(digit-substring traps, unit-scale conversions, period/scope/basis reconciliation, evidence-caveat
+cases) specifically to measure whether the deterministic layer catches them — it is a targeted
+regression suite, not a random sample of "typical" relationships, so this number should not be
+quoted as "VeriFact is 78.9% accurate" outside that context. Re-run it yourself with
+`python -m evaluation.run_benchmark` — every number here is reproducible, not asserted.
 
 An earlier pass of this same run showed 1 override "introducing" an
 error; it turned out the benchmark fixture itself (`ct-05`) had left
@@ -986,11 +1015,15 @@ to.
   coordinate pair — isn't supported yet. Next step: an optional `extra_json` column for
   fact-type-specific structured data beyond the generic fields.
 - **No authentication/multi-tenancy** — fine for a local prototype, not for shipping.
-- **Relationship precision is measured by self-consistency, not against human labels.** A
-  corpus-wide audit removed 142 false positives and relabelled 33, all toward the more careful
-  label; graph coherence then *proved* that 25 errors remain (12.8% of closed triangles). Both are
-  strong evidence, but neither is ground truth. Converting them into a true precision figure needs
-  a hand-labelled sample, which has not been done.
+- **Relationship precision at corpus scale is still measured by self-consistency, not human
+  labels.** A corpus-wide audit removed 142 false positives and relabelled 33, all toward the more
+  careful label; graph coherence then *proved* that 25 errors remain (12.8% of closed triangles).
+  Both are strong evidence, but neither is ground truth. A genuine, independently-labelled sample
+  now exists (`evaluation/`, 38 relationship cases + 35 evidence cases — see
+  [Evaluation methodology](#evaluation-methodology) below for real, measured precision/recall/F1),
+  but it's a benchmark-sized sample, not a hand-labelled pass over the full corpus — converting the
+  corpus-wide audit's 401 relationships into a true precision figure at that scale still hasn't
+  been done.
 - **Table reconstruction handles grids, not every layout.** Rows and columns are recovered from
   word coordinates and multi-column pages are split at their gutters, which took evidence
   validation on a table page from 12% to 85%. It does not merge spanning cells, identify header
@@ -1022,10 +1055,12 @@ assumed:
   retriever was built and measured, then reverted: at most 3 additional pairs of recall for 3× the
   LLM calls. Re-litigating a measured decision without new evidence would violate this project's
   own "optimize only what's measured" rule.
-- **A hand-labelled precision benchmark, a vector index, a durable job queue, OCR, multi-agent
-  orchestration.** All out of scope for a prototype at this stage — none of the assignment's
-  "brownie point" extensions require them, and the existing limitations above are already honestly
-  stated rather than hidden behind added machinery.
+- **A vector index, a durable job queue, OCR, multi-agent orchestration.** All out of scope for a
+  prototype at this stage — none of the assignment's "brownie point" extensions require them, and
+  the existing limitations above are already honestly stated rather than hidden behind added
+  machinery. (A hand-labelled precision *benchmark* was in this list earlier; a modest one now
+  exists — see [Evaluation methodology](#evaluation-methodology) — so it's been removed rather than
+  left here inaccurately.)
 - **A fabricated multi-dimensional numeric confidence score** (e.g. a made-up
   `context_confidence: 0.73`). The adjudication `checks` trace — categorical, recording which rule
   fired and what each computed verdict was — represents uncertainty without inventing false
